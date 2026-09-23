@@ -1,8 +1,8 @@
 // SceneApp：原生 Cesium 场景运行时（编辑器与预览页共用）。
-// 职责：模型 / 3D Tiles 加载、文档 diff 同步、拾取、相机、矩阵换算。
+// 职责：模型 / 3D Tiles 加载、文档 diff 同步、地图图层与地形、拾取、相机、矩阵换算。
 
 import * as C from "cesium"
-import type { Asset, ImageryLayerConfig, ProjectState, SceneNode, Transform, Vec3 } from "@scene/schema"
+import type { Asset, ImageryLayerConfig, ProjectState, SceneNode, TerrainConfig, Transform, Vec3 } from "@scene/schema"
 import { localFromWorld, nodeWorldMatrix, parentWorldMatrix, sceneFrame, transformsEqual } from "./matrix"
 
 export { transformsEqual }
@@ -10,7 +10,10 @@ export { transformsEqual }
 interface ManagedImagery {
   id: string
   name: string
-  layer: C.ImageryLayer
+  /** undefined = 异步加载中或未配置（token / 资产 id 待填） */
+  layer?: C.ImageryLayer
+  /** 参与加载的配置签名，变化时重建图层 */
+  signature: string
 }
 
 interface Handle {
@@ -50,6 +53,14 @@ export class SceneApp {
 
   private handler: C.ScreenSpaceEventHandler
   private destroyed = false
+
+  // 地图图层 / 地形状态
+  private mapLayers: ManagedImagery[] = []
+  private imagerySignature = ""
+  private terrainSignature = ""
+  private terrainPending = false
+  private appliedBaseToken = ""
+  private baseSwapping = false
 
   constructor(container: HTMLElement, state: ProjectState, options: SceneAppOptions = {}) {
     this.state = state
@@ -102,9 +113,9 @@ export class SceneApp {
     this.onObjectClick(id)
   }
 
-  // ---------- 同步 ----------
+  // ---------- 节点同步 ----------
 
-  private signature(node: SceneNode): string {
+  private nodeSignature(node: SceneNode): string {
     const asset = node.assetId ? this.state.assets.find((a) => a.id === node.assetId) : undefined
     return JSON.stringify([node.type, node.assetId ?? "", asset?.revision ?? 0, asset?.uri ?? ""])
   }
@@ -120,79 +131,16 @@ export class SceneApp {
     for (const id of [...this.handles.keys()]) {
       if (!seen.has(id)) this.destroyHandle(id)
     }
-    this.syncImagery(state.scene.imageryLayers ?? [], state.scene.baseMapShow ?? true)
-    this.requestRender()
-  }
-
-  // ---------- 地图图层 ----------
-
-  private mapLayers: ManagedImagery[] = []
-  private imagerySignature = ""
-
-  private createImageryLayer(cfg: ImageryLayerConfig): ManagedImagery | null {
-    try {
-      const provider = new C.UrlTemplateImageryProvider({
-        url: cfg.url,
-        subdomains: cfg.subdomains || "abc",
-        maximumLevel: cfg.maximumLevel,
-        credit: cfg.credit,
-      })
-      const layer = this.viewer.imageryLayers.addImageryProvider(provider)
-      layer.show = cfg.show
-      return { id: cfg.id, name: cfg.name, layer }
-    } catch (err) {
-      this.onError(`地图图层 ${cfg.name} 添加失败：${err instanceof Error ? err.message : String(err)}`)
-      return null
-    }
-  }
-
-  /** 文档图层配置 → 运行时：按 id 增量同步，避免显隐切换时重建闪烁 */
-  private syncImagery(configs: ImageryLayerConfig[], baseShow: boolean): void {
     const base = this.viewer.imageryLayers.get(0)
-    if (base) base.show = baseShow
-
-    const signature = JSON.stringify([configs, baseShow])
-    if (signature === this.imagerySignature) return
-    this.imagerySignature = signature
-
-    const existing = new Map(this.mapLayers.map((m) => [m.id, m]))
-    const next: ManagedImagery[] = []
-    for (const cfg of configs) {
-      const kept = existing.get(cfg.id)
-      if (kept) {
-        kept.name = cfg.name
-        kept.layer.show = cfg.show
-        existing.delete(cfg.id)
-        next.push(kept)
-      } else {
-        const created = this.createImageryLayer(cfg)
-        if (created) next.push(created)
-      }
-    }
-    for (const [, m] of existing) this.viewer.imageryLayers.remove(m.layer, true)
-
-    // 图层顺序与配置一致（底图保持在最底层，索引 0）
-    const collection = this.viewer.imageryLayers
-    for (let i = next.length - 1; i >= 0; i--) {
-      let idx = collection.indexOf(next[i]!.layer)
-      for (let guard = 0; idx > i + 1 && guard < 64; guard++) {
-        collection.lower(next[i]!.layer)
-        idx = collection.indexOf(next[i]!.layer)
-      }
-    }
-    this.mapLayers = next
-    this.requestRender()
-  }
-
-  /** 默认底图（Bing 影像）显隐 */
-  setBaseMapShow(show: boolean): void {
-    const base = this.viewer.imageryLayers.get(0)
-    if (base) base.show = show
+    if (base) base.show = state.scene.baseMapShow ?? true
+    this.syncImagery(state.scene.imageryLayers ?? [])
+    this.swapBaseMapToken(state.scene.baseMapIonToken)
+    this.syncTerrain(state.scene.terrain)
     this.requestRender()
   }
 
   private syncNode(node: SceneNode): void {
-    const sig = this.signature(node)
+    const sig = this.nodeSignature(node)
     const existing = this.handles.get(node.id)
     if (existing && existing.signature === sig) {
       this.applyNodeState(node)
@@ -319,6 +267,163 @@ export class SceneApp {
       }
     }
     this.requestRender()
+  }
+
+  // ---------- 地图图层 / 地形 ----------
+
+  private static loadSignature(cfg: ImageryLayerConfig): string {
+    return JSON.stringify([
+      cfg.kind ?? "url-template",
+      cfg.url,
+      cfg.subdomains,
+      cfg.maximumLevel,
+      cfg.credit,
+      cfg.ionToken,
+      cfg.ionAssetId,
+    ])
+  }
+
+  /** 创建图层（ion 异步；未配置 token / id 时返回 null，等待右侧面板补齐） */
+  private async createImageryLayer(cfg: ImageryLayerConfig): Promise<C.ImageryLayer | null> {
+    try {
+      if (cfg.kind === "ion-imagery") {
+        if (!cfg.ionToken || !cfg.ionAssetId) return null
+        const provider = await C.IonImageryProvider.fromAssetId(cfg.ionAssetId, {
+          accessToken: cfg.ionToken,
+        })
+        if (this.destroyed) return null
+        return this.viewer.imageryLayers.addImageryProvider(provider)
+      }
+      if (!cfg.url) return null
+      const provider = new C.UrlTemplateImageryProvider({
+        url: cfg.url,
+        subdomains: cfg.subdomains || "abc",
+        maximumLevel: cfg.maximumLevel,
+        credit: cfg.credit,
+      })
+      return this.viewer.imageryLayers.addImageryProvider(provider)
+    } catch (err) {
+      this.onError(`地图图层 ${cfg.name} 加载失败：${err instanceof Error ? err.message : String(err)}`)
+      return null
+    }
+  }
+
+  /** 文档图层配置 → 运行时：按 id + 加载签名增量同步，显隐切换不重建 */
+  private syncImagery(configs: ImageryLayerConfig[]): void {
+    const signature = JSON.stringify(configs)
+    if (signature !== this.imagerySignature) {
+      this.imagerySignature = signature
+      const existing = new Map(this.mapLayers.map((m) => [m.id, m]))
+      const next: ManagedImagery[] = []
+      for (const cfg of configs) {
+        const loadSig = SceneApp.loadSignature(cfg)
+        const kept = existing.get(cfg.id)
+        if (kept && kept.signature === loadSig) {
+          kept.name = cfg.name
+          if (kept.layer) kept.layer.show = cfg.show
+          existing.delete(cfg.id)
+          next.push(kept)
+          continue
+        }
+        if (kept?.layer) this.viewer.imageryLayers.remove(kept.layer, true)
+        existing.delete(cfg.id)
+        const managed: ManagedImagery = { id: cfg.id, name: cfg.name, signature: loadSig }
+        next.push(managed)
+        void this.createImageryLayer(cfg).then((layer) => {
+          if (this.destroyed) {
+            if (layer) this.viewer.imageryLayers.remove(layer, true)
+            return
+          }
+          const current = (this.state.scene.imageryLayers ?? []).find((c) => c.id === cfg.id)
+          if (!current || SceneApp.loadSignature(current) !== loadSig) {
+            if (layer) this.viewer.imageryLayers.remove(layer, true)
+            return
+          }
+          managed.layer = layer ?? undefined
+          if (managed.layer) managed.layer.show = current.show
+          this.reorderImagery()
+          this.requestRender()
+        })
+      }
+      for (const [, m] of existing) {
+        if (m.layer) this.viewer.imageryLayers.remove(m.layer, true)
+      }
+      this.mapLayers = next
+    }
+    this.reorderImagery()
+    this.requestRender()
+  }
+
+  /** 图层顺序与配置一致（底图保持在最底层，索引 0） */
+  private reorderImagery(): void {
+    const configs = this.state.scene.imageryLayers ?? []
+    const collection = this.viewer.imageryLayers
+    for (let target = configs.length - 1; target >= 0; target--) {
+      const managed = this.mapLayers.find((m) => m.id === configs[target]!.id)
+      if (!managed?.layer) continue
+      let guard = 0
+      while (collection.indexOf(managed.layer) > target + 1 && guard++ < 64) {
+        collection.lower(managed.layer)
+      }
+    }
+  }
+
+  /** 默认底图（Bing 影像）显隐 */
+  setBaseMapShow(show: boolean): void {
+    const base = this.viewer.imageryLayers.get(0)
+    if (base) base.show = show
+    this.requestRender()
+  }
+
+  /** 替换默认底图的 ion 令牌（不填恢复 Cesium 默认令牌） */
+  swapBaseMapToken(token: string | undefined): void {
+    const desired = token ?? ""
+    if (desired === this.appliedBaseToken || this.baseSwapping) return
+    this.baseSwapping = true
+    void (async () => {
+      try {
+        const provider = await C.IonImageryProvider.fromAssetId(2, desired ? { accessToken: desired } : {})
+        if (this.destroyed) return
+        const layers = this.viewer.imageryLayers
+        const old = layers.get(0)
+        const added = layers.addImageryProvider(provider, 0)
+        added.show = old ? old.show : true
+        if (old) layers.remove(old, true)
+        this.appliedBaseToken = desired
+        this.requestRender()
+      } catch (err) {
+        this.onError(`底图加载失败：${err instanceof Error ? err.message : String(err)}（检查 ion 令牌）`)
+      } finally {
+        this.baseSwapping = false
+      }
+    })()
+  }
+
+  private syncTerrain(cfg: TerrainConfig | undefined): void {
+    const signature = JSON.stringify(cfg ?? { kind: "ellipsoid" })
+    if (signature === this.terrainSignature) return
+    this.terrainSignature = signature
+    if (!cfg || cfg.kind === "ellipsoid" || !cfg.ionToken) {
+      this.viewer.terrainProvider = new C.EllipsoidTerrainProvider()
+      this.requestRender()
+      return
+    }
+    if (this.terrainPending) return
+    this.terrainPending = true
+    const wanted = signature
+    void (async () => {
+      try {
+        const resource = await C.IonResource.fromAssetId(cfg.ionAssetId ?? 1, { accessToken: cfg.ionToken })
+        const provider = await C.CesiumTerrainProvider.fromUrl(resource)
+        if (this.destroyed || wanted !== this.terrainSignature) return
+        this.viewer.terrainProvider = provider
+        this.requestRender()
+      } catch (err) {
+        this.onError(`ion 地形加载失败：${err instanceof Error ? err.message : String(err)}（检查令牌与资产 id）`)
+      } finally {
+        this.terrainPending = false
+      }
+    })()
   }
 
   // ---------- 变换读取（供 gizmo 提交用） ----------

@@ -14,7 +14,14 @@ import {
   View,
   Hide,
 } from '@element-plus/icons-vue'
-import { nodeDescendants, orderedNodes, type ImageryLayerConfig, type ProjectState, type SceneNode } from '@scene/schema'
+import {
+  nodeDescendants,
+  orderedNodes,
+  type ImageryLayerConfig,
+  type ProjectState,
+  type SceneNode,
+  type TerrainConfig,
+} from '@scene/schema'
 
 export interface HierarchyMove {
   id: string
@@ -29,6 +36,9 @@ const props = defineProps<{
   selectedId: string
   imageryLayers: ImageryLayerConfig[]
   baseMapShow: boolean
+  terrain: TerrainConfig | undefined
+  /** 选中的地图项：'base' | 'terrain' | 图层 id */
+  selectedMapId: string
 }>()
 
 const emit = defineEmits<{
@@ -44,6 +54,9 @@ const emit = defineEmits<{
   mapToggle: [payload: { id: string; show: boolean }]
   mapRemove: [id: string]
   mapBaseToggle: [show: boolean]
+  mapSelect: [id: string]
+  mapAddIonImagery: []
+  mapAddIonTerrain: []
 }>()
 
 const rows = computed(() => orderedNodes(props.state))
@@ -101,6 +114,9 @@ function addBuiltin(layer: (typeof BUILTIN_LAYERS)[number]) {
   emit('mapAdd', { ...layer })
   mapDialogVisible.value = false
 }
+
+const terrainLabel = () =>
+  props.terrain?.kind === 'ion' ? '地形：Cesium ion 世界地形' : '地形：椭球（无地形）'
 
 function addCustom() {
   const url = customForm.url.trim()
@@ -212,7 +228,12 @@ function rowClasses(row: { node: SceneNode }): Record<string, boolean> {
           <el-button :icon="Plus" size="small" text type="primary" @click="openMapDialog" />
         </el-tooltip>
       </div>
-      <div class="map-layer-row base">
+      <div
+        class="map-layer-row base"
+        :class="{ selected: selectedMapId === 'base' }"
+        title="点击在右侧面板配置"
+        @click="emit('mapSelect', 'base')"
+      >
         <el-icon size="13" color="var(--fg-dim)"><Picture /></el-icon>
         <span class="layer-name">Bing 影像（默认）</span>
         <el-tag size="small" type="info" effect="plain">底图</el-tag>
@@ -220,20 +241,42 @@ function rowClasses(row: { node: SceneNode }): Record<string, boolean> {
           size="14"
           :color="baseMapShow ? 'var(--fg-dim)' : 'var(--accent)'"
           title="显示 / 隐藏默认底图"
-          @click="emit('mapBaseToggle', !baseMapShow)"
+          @click.stop="emit('mapBaseToggle', !baseMapShow)"
         >
           <View v-if="baseMapShow" />
           <Hide v-else />
         </el-icon>
       </div>
-      <div v-for="layer in imageryLayers" :key="layer.id" class="map-layer-row" :class="{ off: !layer.show }">
+      <div
+        class="map-layer-row"
+        :class="{ selected: selectedMapId === 'terrain' }"
+        title="点击在右侧面板配置地形"
+        @click="emit('mapSelect', 'terrain')"
+      >
+        <el-icon size="13" color="var(--fg-dim)"><MapLocation /></el-icon>
+        <span class="layer-name">{{ terrainLabel() }}</span>
+        <el-tag v-if="terrain?.kind === 'ion' && !terrain.ionToken" size="small" type="warning" effect="plain">
+          待填 token
+        </el-tag>
+      </div>
+      <div
+        v-for="layer in imageryLayers"
+        :key="layer.id"
+        class="map-layer-row"
+        :class="{ off: !layer.show, selected: selectedMapId === layer.id }"
+        title="点击在右侧面板配置"
+        @click="emit('mapSelect', layer.id)"
+      >
         <el-icon size="13" color="var(--fg-dim)"><Picture /></el-icon>
         <span class="layer-name" :title="layer.url">{{ layer.name }}</span>
+        <el-tag v-if="layer.kind === 'ion-imagery' && !(layer.ionToken && layer.ionAssetId)" size="small" type="warning" effect="plain">
+          待配置
+        </el-tag>
         <el-icon
           size="14"
           class="action"
           :color="layer.show ? 'var(--fg-dim)' : 'var(--accent)'"
-          @click="emit('mapToggle', { id: layer.id, show: !layer.show })"
+          @click.stop="emit('mapToggle', { id: layer.id, show: !layer.show })"
         >
           <View v-if="layer.show" />
           <Hide v-else />
@@ -330,6 +373,12 @@ function rowClasses(row: { node: SceneNode }): Record<string, boolean> {
           @click="addBuiltin(layer)"
         >
           {{ layer.name }}
+        </el-button>
+        <el-button size="small" plain type="warning" @click="emit('mapAddIonImagery'); mapDialogVisible = false">
+          Cesium ion 影像（需令牌 + 资产 id）
+        </el-button>
+        <el-button size="small" plain type="warning" @click="emit('mapAddIonTerrain'); mapDialogVisible = false">
+          Cesium ion 地形（需令牌）
         </el-button>
       </div>
       <div class="section-title" style="margin: 16px 0 8px">自定义图层</div>

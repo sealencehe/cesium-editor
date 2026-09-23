@@ -61,20 +61,41 @@ export interface SceneDocument {
   imageryLayers?: ImageryLayerConfig[]
   /** 默认底图（Bing 影像）是否可见，缺省为 true */
   baseMapShow?: boolean
+  /** 默认底图的自定义 ion 令牌（不填用 Cesium 默认令牌） */
+  baseMapIonToken?: string
+  /** 场景地形配置，缺省为椭球 */
+  terrain?: TerrainConfig
 }
+
+export type MapLayerKind = "url-template" | "ion-imagery"
 
 export interface ImageryLayerConfig {
   id: string
   name: string
-  /** URL 模板，支持 {x} {y} {z} {s} 占位 */
-  url: string
   show: boolean
+  /** 缺省视为 url-template（旧工程兼容） */
+  kind?: MapLayerKind
+  /** URL 模板，支持 {x} {y} {z} {s} 占位（kind=url-template） */
+  url?: string
   /** {s} 子域字符集，如 "abc" / "1234" */
   subdomains?: string
   /** 最大缩放级别 */
   maximumLevel?: number
   /** 版权说明 */
   credit?: string
+  /** ion 访问令牌（kind=ion-imagery，在右侧面板填写） */
+  ionToken?: string
+  /** ion 影像资产 id（kind=ion-imagery） */
+  ionAssetId?: number
+}
+
+/** 场景地形配置（最多一个） */
+export interface TerrainConfig {
+  kind: "ellipsoid" | "ion"
+  /** ion 访问令牌（kind=ion，在右侧面板填写） */
+  ionToken?: string
+  /** ion 地形资产 id，缺省 1 = Cesium World Terrain */
+  ionAssetId?: number
 }
 
 export interface ProjectState {
@@ -184,9 +205,17 @@ export function validateProject(state: ProjectState): string | null {
   for (const layer of state.scene.imageryLayers ?? []) {
     if (!layer.id || layerIds.has(layer.id)) return `地图图层 id 重复或为空`
     layerIds.add(layer.id)
-    if (!layer.name || !layer.url) return `地图图层 ${layer.name || "(未命名)"} 缺少名称或地址`
-    if (layer.url.includes("..")) return `地图图层 ${layer.name} 的地址不允许包含 ..`
+    if (!layer.name) return `地图图层缺少名称`
+    if (layer.kind === "ion-imagery") {
+      if (layer.ionAssetId !== undefined && !Number.isFinite(layer.ionAssetId)) return `地图图层 ${layer.name} 的资产 id 无效`
+    } else {
+      if (!layer.url) return `地图图层 ${layer.name} 缺少地址`
+      if (layer.url.includes("..")) return `地图图层 ${layer.name} 的地址不允许包含 ..`
+    }
   }
+  const terrain = state.scene.terrain
+  if (terrain && !["ellipsoid", "ion"].includes(terrain.kind)) return "未知地形类型"
+  if (terrain?.ionAssetId !== undefined && !Number.isFinite(terrain.ionAssetId)) return "地形资产 id 无效"
   if (state.scene.baseMapShow !== undefined && typeof state.scene.baseMapShow !== "boolean")
     return "默认底图可见性取值无效"
   return null

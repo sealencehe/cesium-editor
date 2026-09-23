@@ -1,25 +1,107 @@
 <script setup lang="ts">
 import { watch, reactive, ref } from 'vue'
 import { Lock, Unlock } from '@element-plus/icons-vue'
-import type { SceneNode, Transform } from '@scene/schema'
+import type { ImageryLayerConfig, SceneNode, TerrainConfig, Transform } from '@scene/schema'
 import { clone } from '@scene/schema'
+
+export type MapSelection =
+  | { kind: 'base'; token: string }
+  | { kind: 'terrain'; config: TerrainConfig }
+  | { kind: 'layer'; config: ImageryLayerConfig }
+  | null
 
 const props = defineProps<{
   node: SceneNode | null
   groups: SceneNode[]
   /** gizmo 拖拽中的实时变换（覆盖显示） */
   live: Transform | null
+  /** 地图选中项（优先于 node 显示地图配置表单） */
+  mapSelection: MapSelection
 }>()
 
 const emit = defineEmits<{
   apply: [node: SceneNode]
   remove: []
+  applyMapLayer: [config: ImageryLayerConfig]
+  applyBaseToken: [token: string]
+  applyTerrain: [config: TerrainConfig]
 }>()
 
 const form = reactive<SceneNode>(clone(props.node ?? makeEmpty()))
 
 /** 缩放比例锁：锁定时改任一轴，三轴同步（分组节点始终等比） */
 const scaleLocked = ref(true)
+
+// ---------- 地图配置表单 ----------
+
+const baseTokenForm = reactive({ token: '' })
+const terrainForm = reactive<{
+  kind: 'ellipsoid' | 'ion'
+  ionToken: string
+  ionAssetId: number | undefined
+}>({ kind: 'ellipsoid', ionToken: '', ionAssetId: undefined })
+const mapForm = reactive<{
+  name: string
+  url: string
+  subdomains: string
+  maximumLevel: number | undefined
+  ionToken: string
+  ionAssetId: number | undefined
+  show: boolean
+}>({ name: '', url: '', subdomains: '', maximumLevel: undefined, ionToken: '', ionAssetId: undefined, show: true })
+
+watch(
+  () => props.mapSelection,
+  (sel) => {
+    if (sel?.kind === 'base') {
+      baseTokenForm.token = sel.token
+    } else if (sel?.kind === 'terrain') {
+      terrainForm.kind = sel.config.kind
+      terrainForm.ionToken = sel.config.ionToken ?? ''
+      terrainForm.ionAssetId = sel.config.ionAssetId
+    } else if (sel?.kind === 'layer') {
+      mapForm.name = sel.config.name
+      mapForm.url = sel.config.url ?? ''
+      mapForm.subdomains = sel.config.subdomains ?? ''
+      mapForm.maximumLevel = sel.config.maximumLevel
+      mapForm.ionToken = sel.config.ionToken ?? ''
+      mapForm.ionAssetId = sel.config.ionAssetId
+      mapForm.show = sel.config.show
+    }
+  },
+)
+
+function onLayerChange() {
+  if (props.mapSelection?.kind !== 'layer') return
+  emit('applyMapLayer', {
+    ...props.mapSelection.config,
+    name: mapForm.name.trim() || props.mapSelection.config.name,
+    url: mapForm.url.trim() || undefined,
+    subdomains: mapForm.subdomains.trim() || undefined,
+    maximumLevel: mapForm.maximumLevel,
+    ionToken: mapForm.ionToken.trim() || undefined,
+    ionAssetId: mapForm.ionAssetId,
+    show: mapForm.show,
+  })
+}
+
+function onLayerShow(visible: string | number | boolean) {
+  mapForm.show = Boolean(visible)
+  onLayerChange()
+}
+
+function onTerrainChange() {
+  emit('applyTerrain', {
+    kind: terrainForm.kind,
+    ionToken: terrainForm.ionToken.trim() || undefined,
+    ionAssetId: terrainForm.ionAssetId,
+  })
+}
+
+function onTerrainKind(kind: unknown) {
+  terrainForm.kind = kind === 'ion' ? 'ion' : 'ellipsoid'
+  onTerrainChange()
+}
 
 function makeEmpty(): SceneNode {
   return {
@@ -85,7 +167,107 @@ const typeLabel = (node: SceneNode) =>
 
 <template>
   <aside class="inspector">
-    <div v-if="!node" class="empty">未选中对象<br />点击视口或左侧列表选择</div>
+    <template v-if="mapSelection">
+      <template v-if="mapSelection.kind === 'base'">
+        <div class="section-title">地图底图 · Bing 影像（ion 资产 2）</div>
+        <el-form label-position="top" size="small" @submit.prevent>
+          <el-form-item label="ion 访问令牌（留空使用 Cesium 默认令牌）">
+            <el-input
+              v-model="baseTokenForm.token"
+              placeholder="eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
+              show-password
+              @change="emit('applyBaseToken', baseTokenForm.token.trim())"
+            />
+          </el-form-item>
+        </el-form>
+        <el-alert
+          type="info"
+          :closable="false"
+          title="默认令牌有额度限制；正式使用建议在 ion 控制台创建受限权限令牌"
+        />
+      </template>
+
+      <template v-else-if="mapSelection.kind === 'terrain'">
+        <div class="section-title">地形</div>
+        <el-form label-position="top" size="small" @submit.prevent>
+          <el-form-item label="类型">
+            <el-radio-group :model-value="terrainForm.kind" @change="onTerrainKind">
+              <el-radio value="ellipsoid">椭球（无地形）</el-radio>
+              <el-radio value="ion">Cesium ion 地形</el-radio>
+            </el-radio-group>
+          </el-form-item>
+          <template v-if="terrainForm.kind === 'ion'">
+            <el-form-item label="ion 访问令牌（必填）">
+              <el-input v-model="terrainForm.ionToken" show-password @change="onTerrainChange" />
+            </el-form-item>
+            <el-form-item label="地形资产 id（默认 1 = Cesium World Terrain）">
+              <el-input-number
+                v-model="terrainForm.ionAssetId"
+                :min="1"
+                controls-position="right"
+                @change="onTerrainChange"
+              />
+            </el-form-item>
+          </template>
+        </el-form>
+        <el-alert
+          v-if="terrainForm.kind === 'ion' && !terrainForm.ionToken"
+          type="warning"
+          :closable="false"
+          title="未填令牌，当前仍为椭球地形"
+        />
+      </template>
+
+      <template v-else>
+        <div class="section-title">地图图层 · {{ mapSelection.config.name }}</div>
+        <el-form label-position="top" size="small" @submit.prevent>
+          <el-form-item label="名称">
+            <el-input v-model="mapForm.name" @change="onLayerChange" />
+          </el-form-item>
+          <el-form-item label="显示">
+            <el-switch :model-value="mapForm.show" @change="onLayerShow" />
+          </el-form-item>
+          <template v-if="mapSelection.config.kind === 'ion-imagery'">
+            <el-form-item label="ion 访问令牌（必填）">
+              <el-input v-model="mapForm.ionToken" show-password @change="onLayerChange" />
+            </el-form-item>
+            <el-form-item label="ion 影像资产 id（必填）">
+              <el-input-number
+                v-model="mapForm.ionAssetId"
+                :min="1"
+                controls-position="right"
+                @change="onLayerChange"
+              />
+            </el-form-item>
+            <el-alert
+              v-if="!(mapForm.ionToken && mapForm.ionAssetId)"
+              type="warning"
+              :closable="false"
+              title="填写令牌与资产 id 后图层才会加载"
+            />
+          </template>
+          <template v-else>
+            <el-form-item label="URL 模板（{x} {y} {z} {s} 占位）">
+              <el-input v-model="mapForm.url" @change="onLayerChange" />
+            </el-form-item>
+            <el-form-item label="{s} 子域">
+              <el-input v-model="mapForm.subdomains" style="max-width: 160px" @change="onLayerChange" />
+            </el-form-item>
+            <el-form-item label="最大缩放级别（可选）">
+              <el-input-number
+                v-model="mapForm.maximumLevel"
+                :min="0"
+                :max="24"
+                controls-position="right"
+                @change="onLayerChange"
+              />
+            </el-form-item>
+          </template>
+        </el-form>
+      </template>
+    </template>
+
+    <div v-else-if="!node" class="empty">未选中对象<br />点击视口或左侧列表选择</div>
     <template v-else>
       <div class="section-title">{{ typeLabel(node) }} · {{ node.id.slice(0, 8) }}</div>
       <el-form label-position="top" size="small" @submit.prevent>

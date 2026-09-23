@@ -18,7 +18,7 @@ import {
 } from '@element-plus/icons-vue'
 import AssetBrowser from './components/AssetBrowser.vue'
 import HierarchyPanel, { type HierarchyMove } from './components/HierarchyPanel.vue'
-import Inspector from './components/Inspector.vue'
+import Inspector, { type MapSelection } from './components/Inspector.vue'
 import { api, ConflictError, fetchState, type StateResponse } from './api'
 import { usePanels } from './usePanels'
 import { EditorGizmo, EditorHistory, type GizmoMode } from '@editor/core'
@@ -41,6 +41,8 @@ import {
 const hostEl = ref<HTMLElement>()
 const state = shallowRef<ProjectState | null>(null)
 const selectedId = ref('')
+/** 选中的地图项：'' | 'base' | 'terrain' | 图层 id */
+const selectedMapId = ref('')
 const mode = ref<GizmoMode>('translate')
 const booting = ref(true)
 const bootError = ref('')
@@ -69,6 +71,16 @@ const selectedNode = computed<SceneNode | null>(
   () => state.value?.scene.nodes.find((n) => n.id === selectedId.value) ?? null,
 )
 const groupNodes = computed<SceneNode[]>(() => state.value?.scene.nodes.filter((n) => n.type === 'group') ?? [])
+const mapSelection = computed<MapSelection>(() => {
+  const scene = state.value?.scene
+  if (!selectedMapId.value || !scene) return null
+  if (selectedMapId.value === 'base') return { kind: 'base', token: scene.baseMapIonToken ?? '' }
+  if (selectedMapId.value === 'terrain')
+    return { kind: 'terrain', config: scene.terrain ?? { kind: 'ellipsoid' } }
+  const config = (scene.imageryLayers ?? []).find((l) => l.id === selectedMapId.value)
+  return config ? { kind: 'layer', config } : null
+})
+
 const liveForSelected = computed<Transform | null>(() =>
   liveId.value && liveId.value === selectedId.value ? liveTransform.value : null,
 )
@@ -123,11 +135,13 @@ function refresh() {
   } else {
     gizmo?.bind(sel)
   }
+  if (sel) selectedMapId.value = ''
   app?.setSelected(selectedId.value || null)
   scheduleAutosave()
 }
 
 function choose(id: string) {
+  selectedMapId.value = ''
   selectedId.value = id
   const node = id && history ? history.state.scene.nodes.find((n) => n.id === id) : undefined
   gizmo?.bind(node ?? null)
@@ -266,6 +280,55 @@ function toggleBaseMap(show: boolean) {
   edit('修改图层', (s) => {
     s.scene.baseMapShow = show
   })
+}
+
+function onMapSelect(id: string) {
+  selectedId.value = ''
+  selectedMapId.value = id
+  gizmo?.bind(null)
+  app?.setSelected(null)
+}
+
+function applyMapLayer(next: import('@scene/schema').ImageryLayerConfig) {
+  edit('修改图层', (s) => {
+    const layer = (s.scene.imageryLayers ?? []).find((l) => l.id === next.id)
+    if (layer) Object.assign(layer, next)
+  })
+}
+
+function applyBaseToken(token: string) {
+  edit('修改图层', (s) => {
+    s.scene.baseMapIonToken = token || undefined
+  })
+  status(token ? '已应用自定义底图令牌' : '已恢复默认底图令牌')
+}
+
+function applyTerrain(next: import('@scene/schema').TerrainConfig) {
+  edit('修改地形', (s) => {
+    s.scene.terrain = next.kind === 'ion' ? next : { kind: 'ellipsoid' }
+  })
+}
+
+function addIonImageryLayer() {
+  const id = uid('map-')
+  edit('添加图层', (s) => {
+    ;(s.scene.imageryLayers ??= []).push({
+      id,
+      name: 'ion 影像',
+      kind: 'ion-imagery',
+      show: true,
+    })
+  })
+  onMapSelect(id)
+  status('已在右侧面板填写令牌与资产 id 后生效')
+}
+
+function addIonTerrain() {
+  edit('修改地形', (s) => {
+    s.scene.terrain = { kind: 'ion' }
+  })
+  onMapSelect('terrain')
+  status('已在右侧面板填写令牌后生效')
 }
 
 /** 场景树拖拽：子树整体移动；换父级时保持世界变换不变 */
@@ -1089,6 +1152,8 @@ onBeforeUnmount(() => {
       :selected-id="selectedId"
       :imagery-layers="state.scene.imageryLayers ?? []"
       :base-map-show="state.scene.baseMapShow ?? true"
+      :terrain="state.scene.terrain"
+      :selected-map-id="selectedMapId"
       @select="choose"
       @focus="focusNode"
       @toggle="toggleVisible"
@@ -1101,6 +1166,9 @@ onBeforeUnmount(() => {
       @map-toggle="onMapLayerToggle"
       @map-remove="removeMapLayer"
       @map-base-toggle="toggleBaseMap"
+      @map-select="onMapSelect"
+      @map-add-ion-imagery="addIonImageryLayer"
+      @map-add-ion-terrain="addIonTerrain"
     />
 
     <main
@@ -1144,8 +1212,12 @@ onBeforeUnmount(() => {
       :node="selectedNode"
       :groups="groupNodes"
       :live="liveForSelected"
+      :map-selection="mapSelection"
       @apply="applyNode"
       @remove="removeNode"
+      @apply-map-layer="applyMapLayer"
+      @apply-base-token="applyBaseToken"
+      @apply-terrain="applyTerrain"
     />
 
     <AssetBrowser
