@@ -39,7 +39,9 @@ export class SceneApp {
       fullscreenButton: false,
       infoBox: false,
       selectionIndicator: false,
-      baseLayer: false,
+      baseLayer: new C.ImageryLayer(
+        new C.OpenStreetMapImageryProvider({ url: 'https://tile.openstreetmap.org/' }),
+      ),
       terrainProvider: new C.EllipsoidTerrainProvider(),
       scene3DOnly: true,
       requestRenderMode: true,
