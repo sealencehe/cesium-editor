@@ -22,3 +22,7 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+projects/
+.exports/
+.env.local
+.env.*.local

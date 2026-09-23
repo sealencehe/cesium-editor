@@ -4,7 +4,7 @@
 //   worldMatrix = parentWorld * localMatrix，根节点父级为场景锚点 ENU 帧
 
 import * as C from "cesium"
-import type { ProjectState, SceneNode, Transform, Vec3 } from "../schema"
+import type { ProjectState, SceneNode, Transform, Vec3 } from "@scene/schema"
 
 export function localMatrix(t: Transform): C.Matrix4 {
   const hpr = new C.HeadingPitchRoll(

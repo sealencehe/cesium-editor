@@ -4,10 +4,10 @@
 // 拖拽事务边界：一次拖拽只产生一条历史记录。
 
 import { TransformGizmo } from "cesium-transform-gizmo"
-import type { SceneApp } from "../runtime/sceneApp"
-import type { SceneNode, Transform } from "../schema"
-import { clone } from "../schema"
-import { transformsEqual } from "../runtime/matrix"
+import type { SceneApp } from "@scene/runtime"
+import type { SceneNode, Transform } from "@scene/schema"
+import { clone } from "@scene/schema"
+import { transformsEqual } from "@scene/runtime"
 
 export type GizmoMode = "translate" | "rotate" | "scale"
 

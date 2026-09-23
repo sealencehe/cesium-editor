@@ -5,6 +5,7 @@ import {
   Aim,
   ArrowDown,
   Camera,
+  CaretBottom,
   Delete,
   DocumentChecked,
   FolderOpened,
@@ -13,13 +14,15 @@ import {
   Position,
   RefreshLeft,
   RefreshRight,
+  VideoPlay,
 } from '@element-plus/icons-vue'
 import AssetBrowser from './components/AssetBrowser.vue'
 import HierarchyPanel from './components/HierarchyPanel.vue'
 import Inspector from './components/Inspector.vue'
-import { EditorHistory } from './editor/history'
-import { EditorGizmo, type GizmoMode } from './editor/gizmo'
-import { SceneApp } from './runtime/sceneApp'
+import { api, ConflictError, fetchState, type StateResponse } from './api'
+import { usePanels } from './usePanels'
+import { EditorGizmo, EditorHistory, type GizmoMode } from '@editor/core'
+import { SceneApp } from '@scene/runtime'
 import {
   assetReferences,
   clone,
@@ -31,27 +34,7 @@ import {
   type ProjectState,
   type SceneNode,
   type Transform,
-} from './schema'
-import {
-  deleteFilesOfAsset,
-  deleteProject,
-  getMeta,
-  listProjects,
-  loadProject,
-  saveProject,
-  setMeta,
-  type ProjectRecord,
-} from './storage/db'
-import {
-  normalizePath,
-  planImport,
-  revokeAssetUrls,
-  storeAssetFiles,
-  validateEntry,
-  type ImportEntry,
-  type ImportPlan,
-  type ImportedFile,
-} from './storage/assets'
+} from '@scene/schema'
 
 // ---------- 基础状态 ----------
 
@@ -64,15 +47,22 @@ const importing = ref(false)
 const message = ref('')
 const saveState = ref<'saved' | 'dirty' | 'saving'>('saved')
 const projectName = ref('')
-const assetbarVisible = ref(true)
+const conflict = ref(false)
 const viewportDragover = ref(false)
 const liveId = ref('')
 const liveTransform = shallowRef<Transform | null>(null)
+const { panels, startDrag, toggleAssetbar } = usePanels()
 
 let app: SceneApp | null = null
 let gizmo: EditorGizmo | null = null
 let history: EditorHistory | null = null
+let revision = 0
 let bootstrapped = false
+
+const gridStyle = computed(() => ({
+  gridTemplateColumns: `${panels.left}px 1fr ${panels.right}px`,
+  gridTemplateRows: `48px 40px 1fr ${panels.assetbar ? panels.bottom : 0}px 26px`,
+}))
 
 const selectedNode = computed<SceneNode | null>(
   () => state.value?.scene.nodes.find((n) => n.id === selectedId.value) ?? null,
@@ -353,14 +343,15 @@ function setMode(next: GizmoMode) {
 
 watch(mode, (m) => gizmo?.setMode(m))
 
-// ---------- 保存 / 工程 ----------
+// ---------- 保存 / 工程同步 ----------
 
 let autosaveTimer: ReturnType<typeof setTimeout> | undefined
+let revisionTimer: ReturnType<typeof setInterval> | undefined
 
 function scheduleAutosave() {
   if (!history) return
   saveState.value = history.dirty ? 'dirty' : 'saved'
-  if (!history.dirty) return
+  if (!history.dirty || conflict.value) return
   clearTimeout(autosaveTimer)
   autosaveTimer = setTimeout(() => void save(false), 1800)
 }
@@ -369,23 +360,67 @@ async function save(manual = false) {
   if (!history || saveState.value === 'saving') return
   saveState.value = 'saving'
   try {
-    await saveProject(projectName.value, history.state)
+    const data = await api<{ revision: number }>('/api/state', 'PUT', {
+      state: history.state,
+      revision,
+    })
+    revision = data.revision
     history.markSaved()
     saveState.value = 'saved'
     if (manual) ElMessage.success('已保存')
   } catch (err) {
     saveState.value = 'dirty'
-    ElMessage.error(`保存失败：${err instanceof Error ? err.message : String(err)}`)
+    if (err instanceof ConflictError) {
+      conflict.value = true
+      ElMessage.warning('检测到其他窗口修改了本工程，自动保存已暂停')
+    } else {
+      ElMessage.error(`保存失败：${err instanceof Error ? err.message : String(err)}`)
+    }
   }
 }
 
+async function applyServerState(data: StateResponse) {
+  revision = data.revision
+  projectName.value = data.projectName
+  history!.replace(data.state)
+  choose('')
+  app!.restoreCamera()
+}
+
+async function pollRevision() {
+  try {
+    const data = await api<{ revision: number }>('/api/revision')
+    if (data.revision === revision) return
+    if (history?.dirty) {
+      conflict.value = true
+      return
+    }
+    await applyServerState(await fetchState())
+  } catch {
+    /* 服务暂不可达时忽略 */
+  }
+}
+
+async function discardLocalAndReload() {
+  conflict.value = false
+  await applyServerState(await fetchState())
+  status('已放弃本地修改并重新加载')
+}
+
+// ---------- 工程 ----------
+
 const projectsVisible = ref(false)
-const projectList = ref<ProjectRecord[]>([])
+const projectList = ref<Array<{ name: string; updatedAt: number }>>()
 const newProjectName = ref('')
 
 async function openProjects() {
   projectsVisible.value = true
-  projectList.value = await listProjects()
+  await refreshProjectList()
+}
+
+async function refreshProjectList() {
+  const data = await api<{ projects: Array<{ name: string; updatedAt: number }> }>('/api/projects')
+  projectList.value = data.projects
 }
 
 async function createNewProject(name: string) {
@@ -394,32 +429,27 @@ async function createNewProject(name: string) {
     ElMessage.warning('请输入工程名称')
     return
   }
-  const st = newProject(trimmed)
-  await saveProject(trimmed, st)
-  await setMeta('activeProject', trimmed)
-  projectName.value = trimmed
-  history!.replace(st)
-  choose('')
-  app!.restoreCamera()
-  projectsVisible.value = false
-  newProjectName.value = ''
-  status(`已创建工程 ${trimmed}`)
+  try {
+    if (history?.dirty) await save(false)
+    await applyServerState(await api<StateResponse>('/api/projects/create', 'POST', { name: trimmed }))
+    projectsVisible.value = false
+    newProjectName.value = ''
+    status(`已创建工程 ${trimmed}`)
+  } catch (err) {
+    ElMessage.error(err instanceof Error ? err.message : String(err))
+  }
 }
 
 async function openProjectByName(name: string) {
-  if (history?.dirty) await save(false)
-  const st = await loadProject(name)
-  if (!st) {
-    ElMessage.error('工程不存在')
-    return
+  try {
+    if (history?.dirty) await save(false)
+    await applyServerState(await api<StateResponse>('/api/projects/open', 'POST', { name }))
+    projectsVisible.value = false
+    status(`已打开 ${name}`)
+  } catch (err) {
+    ElMessage.error(err instanceof Error ? err.message : String(err))
+    await refreshProjectList()
   }
-  projectName.value = name
-  await setMeta('activeProject', name)
-  history!.replace(st)
-  choose('')
-  app!.restoreCamera()
-  projectsVisible.value = false
-  status(`已打开 ${name}`)
 }
 
 async function deleteProjectByName(name: string) {
@@ -428,23 +458,15 @@ async function deleteProjectByName(name: string) {
     return
   }
   try {
-    await ElMessageBox.confirm(`确定删除工程「${name}」？该操作不可恢复。`, '删除工程', {
+    await ElMessageBox.confirm(`确定删除工程「${name}」？请手动删除 projects 目录下的对应文件夹。`, '删除工程', {
       type: 'warning',
-      confirmButtonText: '删除',
+      confirmButtonText: '知道了',
       cancelButtonText: '取消',
     })
   } catch {
     return
   }
-  await deleteProject(name)
-  projectList.value = await listProjects()
-  status(`已删除工程 ${name}`)
-}
-
-function onProjectCommand(command: string) {
-  if (command === 'saveas') void saveAs()
-  else if (command === 'export') exportSnapshot()
-  else if (command === 'import') snapshotInputRef.value?.click()
+  status(`请手动删除 projects/${name} 目录`)
 }
 
 async function saveAs() {
@@ -460,14 +482,61 @@ async function saveAs() {
   } catch {
     return
   }
-  const st = clone(history!.state)
-  st.project.name = name
-  await saveProject(name, st)
-  await setMeta('activeProject', name)
-  projectName.value = name
-  history!.replace(st)
-  status(`已另存为 ${name}`)
+  try {
+    const st = clone(history!.state)
+    st.project.name = name
+    await applyServerState(await api<StateResponse>('/api/projects/fork', 'POST', { name, state: st }))
+    status(`已另存为 ${name}`)
+  } catch (err) {
+    ElMessage.error(err instanceof Error ? err.message : String(err))
+  }
 }
+
+// ---------- 预览 / 导出 ----------
+
+async function preview() {
+  try {
+    if (history?.dirty) await save(false)
+  } finally {
+    window.open('/player.html', '_blank')
+  }
+}
+
+const exportVisible = ref(false)
+const exportKind = ref<'scene' | 'source' | 'build'>('scene')
+const exportBase = ref('/')
+const exportJob = ref<{ status: string; resultPath?: string; error?: string } | null>(null)
+let exportJobId = ''
+
+function openExport() {
+  exportVisible.value = true
+  exportJob.value = null
+}
+
+async function startExportJob() {
+  if (history?.dirty) await save(false)
+  const data = await api<{ jobId: string }>('/api/export', 'POST', {
+    kind: exportKind.value,
+    base: exportBase.value,
+  })
+  exportJobId = data.jobId
+  exportJob.value = { status: 'running' }
+  void pollExportJob()
+}
+
+async function pollExportJob() {
+  const job = await api<{ status: string; resultPath?: string; error?: string }>(`/api/jobs/${exportJobId}`)
+  exportJob.value = job
+  if (job.status === 'running') {
+    setTimeout(() => void pollExportJob(), 800)
+  } else if (job.status === 'done') {
+    ElMessage.success('导出完成，结果见对话框内路径')
+  } else {
+    ElMessage.error(`导出失败：${job.error ?? '未知错误'}`)
+  }
+}
+
+// ---------- 快照 ----------
 
 function exportSnapshot() {
   const blob = new Blob(
@@ -490,14 +559,13 @@ async function onSnapshotPicked(e: Event) {
   try {
     const data = JSON.parse(await file.text())
     if (data?.app !== 'cesium-editor' || !data?.state) throw new Error('不是本编辑器导出的快照')
-    const st = data.state as ProjectState
-    projectName.value = st.project.name
-    history!.replace(st)
-    await setMeta('activeProject', st.project.name)
-    await saveProject(st.project.name, st)
-    choose('')
-    app!.restoreCamera()
-    ElMessage.success('快照已导入')
+    edit('导入快照', (s) => {
+      const incoming = data.state as ProjectState
+      s.scene = incoming.scene
+      s.assets = incoming.assets
+    })
+    await save(false)
+    ElMessage.success('快照已导入（引用的本地资源需已存在）')
   } catch (err) {
     ElMessage.error(`导入快照失败：${err instanceof Error ? err.message : String(err)}`)
   }
@@ -509,15 +577,18 @@ const fileInputRef = ref<HTMLInputElement>()
 const dirInputRef = ref<HTMLInputElement>()
 const snapshotInputRef = ref<HTMLInputElement>()
 const importDialogVisible = ref(false)
-const importPlan = shallowRef<ImportPlan | null>(null)
+const importCandidates = ref<Array<{ path: string; type: 'model' | 'tileset' }>>([])
 const importEntryPath = ref('')
+let pendingFiles: File[] = []
 
-function collectFiles(list: File[]): ImportedFile[] {
+const IMPORT_ACCEPT = '.glb,.gltf,.bin,.png,.jpg,.jpeg,.webp,.ktx2,.json,.b3dm,.i3dm,.pnts,.cmpt'
+
+function collectFiles(list: File[]): Array<{ path: string; blob: File }> {
   return list.map((f) => {
     const rel = (f as File & { webkitRelativePath?: string }).webkitRelativePath
     // 目录导入时去掉顶层目录名，与 tileset.json 内部的相对路径对齐
     const path = rel ? rel.split('/').slice(1).join('/') || f.name : f.name
-    return { path: normalizePath(path), blob: f }
+    return { path: path.replace(/\\/g, '/'), blob: f }
   })
 }
 
@@ -528,51 +599,58 @@ function onPickFiles(e: Event) {
   void handleFiles(files)
 }
 
-async function handleFiles(files: File[]) {
-  const plan = planImport(collectFiles(files))
-  if (!plan.files.length) {
-    ElMessage.warning('没有可识别的资源文件（支持 glb / gltf / 3D Tiles 目录）')
-    return
-  }
-  if (!plan.entries.length) {
+function handleFiles(files: File[]) {
+  pendingFiles = files
+  const entries = collectFiles(files)
+    .filter(
+      (f) =>
+        f.path.split('/').pop()?.toLowerCase() === 'tileset.json' ||
+        /\.(glb|gltf)$/i.test(f.path),
+    )
+    .map((f) => ({
+      path: f.path,
+      type: f.path.split('/').pop()?.toLowerCase() === 'tileset.json' ? ('tileset' as const) : ('model' as const),
+    }))
+  if (!entries.length) {
     ElMessage.error('未找到入口文件（tileset.json 或 .glb / .gltf）')
     return
   }
-  if (plan.entries.length === 1) {
-    await doImport(plan, plan.entries[0])
+  if (entries.length === 1) {
+    void doImport(entries[0]!)
   } else {
-    importPlan.value = plan
-    importEntryPath.value = plan.entries[0]!.path
+    importCandidates.value = entries
+    importEntryPath.value = entries[0]!.path
     importDialogVisible.value = true
   }
 }
 
-async function confirmImport() {
-  const entry = importPlan.value?.entries.find((e) => e.path === importEntryPath.value)
+function confirmImport() {
+  const entry = importCandidates.value.find((e) => e.path === importEntryPath.value)
   importDialogVisible.value = false
-  if (entry && importPlan.value) await doImport(importPlan.value, entry)
+  if (entry) void doImport(entry)
 }
 
-async function doImport(plan: ImportPlan, entry: ImportEntry) {
+async function blobToBase64(blob: Blob): Promise<string> {
+  const buf = new Uint8Array(await blob.arrayBuffer())
+  let binary = ''
+  const chunk = 0x8000
+  for (let i = 0; i < buf.length; i += chunk) {
+    binary += String.fromCharCode(...buf.subarray(i, i + chunk))
+  }
+  return btoa(binary)
+}
+
+async function doImport(entry: { path: string; type: 'model' | 'tileset' }) {
   importing.value = true
   try {
-    await validateEntry(plan.files, entry)
-    const assetId = uid('asset-')
-    await storeAssetFiles(assetId, plan.files)
-    const name = entry.path.split('/').pop()!
+    const files = collectFiles(pendingFiles)
+    const payload = await Promise.all(files.map(async (f) => ({ path: f.path, data: await blobToBase64(f.blob) })))
+    const data = await api<{ asset: Asset }>('/api/import', 'POST', { files: payload, entry })
+    const asset = data.asset
     edit('导入资源', (s) => {
-      s.assets.push({
-        id: assetId,
-        name,
-        type: entry.type,
-        uri: `idb://${assetId}/${normalizePath(entry.path)}`,
-        folder: '导入资源',
-        tags: [],
-        revision: 1,
-        files: plan.files.map((f) => normalizePath(f.path)),
-      })
+      s.assets.push(asset)
     })
-    ElMessage.success(`已导入 ${name}`)
+    ElMessage.success(`已导入 ${asset.name}`)
   } catch (err) {
     ElMessage.error(`导入失败：${err instanceof Error ? err.message : String(err)}`)
   } finally {
@@ -670,12 +748,17 @@ async function removeAsset() {
   } catch {
     return
   }
+  const assetId = asset.id
+  const uri = asset.uri
   edit('删除资源', (s) => {
-    s.assets = s.assets.filter((a) => a.id !== asset.id)
+    s.assets = s.assets.filter((a) => a.id !== assetId)
   })
-  if (asset.uri.startsWith('idb://')) {
-    await deleteFilesOfAsset(asset.id)
-    revokeAssetUrls(asset.id)
+  if (uri.startsWith('assets/files/')) {
+    try {
+      await api('/api/assets/delete', 'POST', { assetId })
+    } catch {
+      /* 文件删除失败不阻塞 */
+    }
   }
   infoVisible.value = false
   status(`已删除资源 ${asset.name}`)
@@ -795,25 +878,19 @@ onMounted(async () => {
 
   dirInputRef.value?.setAttribute('webkitdirectory', '')
 
-  const active = await getMeta<string>('activeProject')
-  let st = active ? await loadProject(active) : undefined
-  let firstRun = false
-  if (!st) {
-    st = newProject('默认工程')
-    firstRun = true
-  }
-  projectName.value = st.project.name
-  history = new EditorHistory(st)
+  const data = await fetchState()
+  revision = data.revision
+  projectName.value = data.projectName
+  history = new EditorHistory(data.state)
   history.onChange = refresh
-  state.value = st
-  app.sync(st)
+  state.value = data.state
+  app.sync(data.state)
   app.restoreCamera()
   refresh()
-  await setMeta('activeProject', st.project.name)
-  if (firstRun) await saveProject(st.project.name, st)
 
   window.addEventListener('keydown', keydown)
   window.addEventListener('beforeunload', beforeUnload)
+  revisionTimer = setInterval(() => void pollRevision(), 3000)
   Object.assign(window, {
     __cesiumEditor: { app, history, gizmo },
   })
@@ -825,13 +902,14 @@ onBeforeUnmount(() => {
   if (!bootstrapped) return
   window.removeEventListener('keydown', keydown)
   window.removeEventListener('beforeunload', beforeUnload)
+  if (revisionTimer) clearInterval(revisionTimer)
   gizmo?.destroy()
   app?.destroy()
 })
 </script>
 
 <template>
-  <div class="workbench" :class="{ 'assetbar-hidden': !assetbarVisible }">
+  <div class="workbench" :style="gridStyle">
     <header class="topbar">
       <span class="brand">
         <el-icon><Place /></el-icon>
@@ -842,21 +920,35 @@ onBeforeUnmount(() => {
       </el-button>
       <el-tag size="small" :type="saveTagType">{{ saveText }}</el-tag>
       <span class="spacer"></span>
+      <el-button size="small" :icon="VideoPlay" @click="preview">预览</el-button>
       <el-button size="small" type="primary" :icon="DocumentChecked" @click="save(true)">保存</el-button>
-      <el-dropdown @command="onProjectCommand">
-        <el-button size="small" class="el-dropdown-selfdefine">
-          工程
+      <el-dropdown
+        @command="
+          (cmd: string) =>
+            cmd === 'export' ? openExport() : cmd === 'saveas' ? saveAs() : cmd === 'snap' ? exportSnapshot() : snapshotInputRef?.click()
+        "
+      >
+        <el-button size="small">
+          构建 / 导出
           <el-icon style="margin-left: 4px"><ArrowDown /></el-icon>
         </el-button>
         <template #dropdown>
           <el-dropdown-menu>
-            <el-dropdown-item command="saveas">另存为…</el-dropdown-item>
-            <el-dropdown-item command="export">导出场景快照（JSON）</el-dropdown-item>
-            <el-dropdown-item command="import">导入场景快照…</el-dropdown-item>
+            <el-dropdown-item command="export">构建 / 导出…</el-dropdown-item>
+            <el-dropdown-item command="saveas">另存为新工程</el-dropdown-item>
+            <el-dropdown-item command="snap">导出场景快照（JSON）</el-dropdown-item>
+            <el-dropdown-item command="snapImport">导入场景快照…</el-dropdown-item>
           </el-dropdown-menu>
         </template>
       </el-dropdown>
     </header>
+
+    <div v-if="conflict" class="conflict-banner">
+      工程已在其他窗口被修改，自动保存已暂停。
+      <el-button size="small" @click="saveAs">另存为新工程</el-button>
+      <el-button size="small" @click="exportSnapshot">下载未保存快照</el-button>
+      <el-button size="small" type="warning" @click="discardLocalAndReload">放弃本地修改并重新加载</el-button>
+    </div>
 
     <nav class="toolbar">
       <el-tooltip :content="undoTip" :show-after="400">
@@ -882,7 +974,7 @@ onBeforeUnmount(() => {
       <span class="hint">
         双击资源添加 · 拖入视口放置 · W/E/R 变换 · F 聚焦 · Delete 删除 · Ctrl+Z / Ctrl+Y 撤销重做
       </span>
-      <el-switch v-model="assetbarVisible" active-text="资源栏" size="small" />
+      <el-switch :model-value="panels.assetbar" active-text="资源栏" size="small" @change="toggleAssetbar" />
     </nav>
 
     <HierarchyPanel
@@ -916,6 +1008,17 @@ onBeforeUnmount(() => {
         <el-button size="small" :icon="Camera" @click="saveDefaultView">设为默认视角</el-button>
         <el-button size="small" :icon="Aim" @click="resetCamera">回到默认视角</el-button>
       </div>
+      <!-- 面板拖拽手柄 -->
+      <div class="resize-handle col" title="拖动调整左栏宽度" @pointerdown="startDrag('left', $event)"></div>
+      <div class="resize-handle col right-edge" title="拖动调整右栏宽度" @pointerdown="startDrag('right', $event)"></div>
+      <div
+        v-if="panels.assetbar"
+        class="resize-handle row"
+        title="拖动调整资源栏高度"
+        @pointerdown="startDrag('bottom', $event)"
+      >
+        <el-icon :size="10"><CaretBottom /></el-icon>
+      </div>
     </main>
 
     <Inspector
@@ -943,23 +1046,35 @@ onBeforeUnmount(() => {
     </footer>
 
     <!-- 隐藏输入 -->
-    <input ref="fileInputRef" type="file" multiple hidden accept=".glb,.gltf,.bin,.png,.jpg,.jpeg,.webp,.ktx2,.json,.b3dm,.i3dm,.pnts,.cmpt" @change="onPickFiles" />
+    <input ref="fileInputRef" type="file" multiple hidden :accept="IMPORT_ACCEPT" @change="onPickFiles" />
     <input ref="dirInputRef" type="file" multiple hidden @change="onPickFiles" />
     <input ref="snapshotInputRef" type="file" hidden accept=".json" @change="onSnapshotPicked" />
 
     <!-- 工程管理 -->
     <el-dialog v-model="projectsVisible" title="工程管理" width="540px">
       <div class="dialog-row">
-        <el-input v-model="newProjectName" placeholder="新工程名称" style="flex: 1" @keyup.enter="createNewProject(newProjectName)" />
+        <el-input
+          v-model="newProjectName"
+          placeholder="新工程名称"
+          style="flex: 1"
+          @keyup.enter="createNewProject(newProjectName)"
+        />
         <el-button type="primary" @click="createNewProject(newProjectName)">创建并打开</el-button>
       </div>
       <el-divider style="margin: 10px 0" />
-      <div v-if="!projectList.length" class="empty-tip">暂无已保存的工程</div>
-      <div v-for="p in projectList" :key="p.name" class="dialog-row">
+      <div v-if="!projectList?.length" class="empty-tip">暂无已保存的工程</div>
+      <div v-for="p in projectList ?? []" :key="p.name" class="dialog-row">
         <span class="grow" :title="p.name">{{ p.name }}</span>
         <span style="color: var(--fg-dim); font-size: 12px">{{ new Date(p.updatedAt).toLocaleString() }}</span>
         <el-button size="small" type="primary" plain @click="openProjectByName(p.name)">打开</el-button>
-        <el-button size="small" type="danger" plain :icon="Delete" :disabled="p.name === projectName" @click="deleteProjectByName(p.name)" />
+        <el-button
+          size="small"
+          type="danger"
+          plain
+          :icon="Delete"
+          :disabled="p.name === projectName"
+          @click="deleteProjectByName(p.name)"
+        />
       </div>
     </el-dialog>
 
@@ -969,7 +1084,7 @@ onBeforeUnmount(() => {
         检测到多个入口文件，请选择要导入的一个（其余文件作为依赖一并入库）：
       </p>
       <el-radio-group v-model="importEntryPath" style="display: flex; flex-direction: column; gap: 6px">
-        <el-radio v-for="e in importPlan?.entries ?? []" :key="e.path" :value="e.path">
+        <el-radio v-for="e in importCandidates" :key="e.path" :value="e.path">
           {{ e.path }}（{{ e.type === 'tileset' ? '3D Tiles' : '模型' }}）
         </el-radio>
       </el-radio-group>
@@ -995,6 +1110,44 @@ onBeforeUnmount(() => {
       <template #footer>
         <el-button @click="remoteVisible = false">取消</el-button>
         <el-button type="primary" @click="registerRemote">登记</el-button>
+      </template>
+    </el-dialog>
+
+    <!-- 构建 / 导出 -->
+    <el-dialog v-model="exportVisible" title="构建 / 导出" width="560px">
+      <el-form label-position="top">
+        <el-form-item label="导出内容">
+          <el-radio-group v-model="exportKind" style="display: flex; flex-direction: column; gap: 8px">
+            <el-radio value="scene">场景包（拷贝工程数据目录，可备份 / 迁移）</el-radio>
+            <el-radio value="source">源码工程（可独立运行的 Vite 项目，含运行时与场景数据）</el-radio>
+            <el-radio value="build">静态网站（在源码工程基础上执行构建，输出 dist/）</el-radio>
+          </el-radio-group>
+        </el-form-item>
+        <el-form-item label="部署基础路径（静态网站用，如 / 或 /my-scene/）">
+          <el-input v-model="exportBase" placeholder="/" style="max-width: 280px" />
+        </el-form-item>
+      </el-form>
+      <el-alert
+        v-if="exportJob && exportJob.status === 'done'"
+        type="success"
+        :closable="false"
+        :title="`导出完成：${exportJob.resultPath}`"
+        style="margin-bottom: 8px"
+      />
+      <el-alert
+        v-else-if="exportJob && exportJob.status === 'error'"
+        type="error"
+        :closable="false"
+        :title="`导出失败：${exportJob.error}`"
+        style="margin-bottom: 8px"
+      />
+      <div v-else-if="exportJob" class="dialog-row" style="color: var(--fg-dim)">
+        <el-icon class="is-loading"><Loading /></el-icon>
+        正在处理{{ exportKind === 'build' ? '（源码工程需安装依赖并构建，耗时较长）' : '' }}…
+      </div>
+      <template #footer>
+        <el-button @click="exportVisible = false">关闭</el-button>
+        <el-button type="primary" :loading="exportJob?.status === 'running'" @click="startExportJob">开始导出</el-button>
       </template>
     </el-dialog>
 

@@ -5,11 +5,23 @@
     "types": ["vite/client"],
     "allowArbitraryExtensions": true,
 
+    "paths": {
+      "@scene/schema": ["./packages/scene-schema/src/index.ts"],
+      "@scene/runtime": ["./packages/scene-runtime/src/index.ts"],
+      "@editor/core": ["./packages/editor-core/src/index.ts"]
+    },
+
     /* Linting */
     "noUnusedLocals": true,
     "noUnusedParameters": true,
     "erasableSyntaxOnly": true,
     "noFallthroughCasesInSwitch": true
   },
-  "include": ["src/**/*.ts", "src/**/*.tsx", "src/**/*.vue"]
+  "include": [
+    "apps/**/*.ts",
+    "apps/**/*.vue",
+    "packages/scene-schema/src/**/*.ts",
+    "packages/scene-runtime/src/**/*.ts",
+    "packages/editor-core/src/**/*.ts"
+  ]
 }

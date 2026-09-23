@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { watch, reactive } from 'vue'
-import type { SceneNode, Transform } from '../schema'
-import { clone } from '../schema'
+import type { SceneNode, Transform } from '@scene/schema'
+import { clone } from '@scene/schema'
 
 const props = defineProps<{
   node: SceneNode | null

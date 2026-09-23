@@ -11,7 +11,7 @@ import {
   Upload,
   UploadFilled,
 } from '@element-plus/icons-vue'
-import type { Asset } from '../schema'
+import type { Asset } from '@scene/schema'
 
 const props = defineProps<{
   assets: Asset[]

@@ -1,6 +1,6 @@
 // 快照式撤销 / 重做：每次编辑克隆整份工程文档，验证后入栈。
 
-import { clone, validateProject, type ProjectState } from "../schema"
+import { clone, validateProject, type ProjectState } from "@scene/schema"
 
 interface Snapshot {
   label: string
@@ -89,3 +89,6 @@ export class EditorHistory {
     this.onChange()
   }
 }
+
+export { EditorGizmo } from "./gizmo"
+export type { GizmoMode } from "./gizmo"

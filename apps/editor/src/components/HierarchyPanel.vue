@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed } from 'vue'
 import { Box, Folder, FolderAdd, CopyDocument, Delete, MagicStick, View, Hide } from '@element-plus/icons-vue'
-import { orderedNodes, type ProjectState, type SceneNode } from '../schema'
+import { orderedNodes, type ProjectState, type SceneNode } from '@scene/schema'
 
 const props = defineProps<{
   state: ProjectState

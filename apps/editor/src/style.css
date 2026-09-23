@@ -51,9 +51,6 @@ body {
   min-width: 960px;
 }
 
-.workbench.assetbar-hidden {
-  grid-template-rows: var(--topbar-h) var(--toolbar-h) 1fr 0 var(--statusbar-h);
-}
 
 .topbar {
   grid-area: topbar;
@@ -393,4 +390,58 @@ body {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* 面板拖拽手柄（挂在视口边缘） */
+.resize-handle {
+  position: absolute;
+  z-index: 15;
+}
+
+.resize-handle:hover,
+.resize-handle:active {
+  background: rgba(64, 158, 255, 0.35);
+}
+
+.resize-handle.col {
+  top: 0;
+  bottom: 0;
+  left: -3px;
+  width: 6px;
+  cursor: col-resize;
+}
+
+.resize-handle.col.right-edge {
+  left: auto;
+  right: -3px;
+}
+
+.resize-handle.row {
+  left: 0;
+  right: 0;
+  bottom: -3px;
+  height: 7px;
+  cursor: row-resize;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--fg-dim);
+}
+
+/* 多窗口冲突横幅 */
+.conflict-banner {
+  grid-area: viewport;
+  place-self: start center;
+  z-index: 30;
+  margin-top: 10px;
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  background: #3a2f1e;
+  border: 1px solid #8a6d3b;
+  color: #f2d9a0;
+  padding: 8px 14px;
+  border-radius: 8px;
+  font-size: 13px;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.4);
 }

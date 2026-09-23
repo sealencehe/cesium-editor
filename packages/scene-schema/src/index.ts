@@ -17,13 +17,13 @@ export interface Asset {
   id: string
   name: string
   type: AssetType
-  /** idb://<assetId>/<入口相对路径> 或 http(s) 地址 */
+  /** 工程相对路径（assets/files/<id>/<入口>）或 http(s) 地址 */
   uri: string
   folder: string
   tags: string[]
   revision: number
   thumbnail?: string
-  /** 本地导入时写入 IndexedDB 的相对路径清单 */
+  /** 本地导入时随资源一起入库的相对路径清单 */
   files?: string[]
   /** 预制体载荷 */
   data?: { nodes: SceneNode[] }
@@ -157,6 +157,8 @@ export function validateProject(state: ProjectState): string | null {
     assetIds.add(a.id)
     if (!["model", "tileset", "prefab"].includes(a.type)) return `未知资源类型：${a.type}`
     if (!a.uri) return `资源 ${a.name} 缺少地址`
+    if (!/^https?:\/\//i.test(a.uri) && (a.uri.includes("..") || a.uri.startsWith("/")))
+      return `资源 ${a.name} 的地址必须是 http(s) 或工程相对路径`
   }
   if (!validTransform({ position: state.scene.anchor, rotation: [0, 0, 0], scale: [1, 1, 1] }))
     return "场景锚点数值无效"

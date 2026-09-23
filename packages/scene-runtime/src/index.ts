@@ -1,10 +1,11 @@
-// SceneApp：原生 Cesium 场景运行时。
+// SceneApp：原生 Cesium 场景运行时（编辑器与预览页共用）。
 // 职责：模型 / 3D Tiles 加载、文档 diff 同步、拾取、相机、矩阵换算。
 
 import * as C from "cesium"
-import type { ProjectState, SceneNode, Transform, Vec3 } from "../schema"
-import { resolveAssetUrl } from "../storage/assets"
-import { localFromWorld, nodeWorldMatrix, parentWorldMatrix, sceneFrame } from "./matrix"
+import type { Asset, ProjectState, SceneNode, Transform, Vec3 } from "@scene/schema"
+import { localFromWorld, nodeWorldMatrix, parentWorldMatrix, sceneFrame, transformsEqual } from "./matrix"
+
+export { transformsEqual }
 
 interface Handle {
   ready: boolean
@@ -13,11 +14,26 @@ interface Handle {
   signature: string
 }
 
+export interface SceneAppOptions {
+  /** 编辑模式：开启点击拾取；预览页设为 false */
+  editing?: boolean
+  /** 工程静态资源前缀，默认 /project/（由本地服务或部署目录提供） */
+  projectBase?: string
+}
+
+/** 资源 URI → 可加载地址：http(s) 原样，工程相对路径拼上 projectBase */
+export function assetUrl(asset: Asset, projectBase: string): string {
+  if (/^https?:\/\//i.test(asset.uri)) return asset.uri
+  return projectBase.replace(/\/$/, "") + "/" + asset.uri.replace(/^\//, "")
+}
+
 export class SceneApp {
   viewer: C.Viewer
   state: ProjectState
   frame = C.Matrix4.clone(C.Matrix4.IDENTITY)
   handles = new Map<string, Handle>()
+  editing: boolean
+  projectBase: string
 
   onObjectClick: (nodeId: string | undefined) => void = () => {}
   onNodeReady: (id: string) => void = () => {}
@@ -26,9 +42,13 @@ export class SceneApp {
   private handler: C.ScreenSpaceEventHandler
   private destroyed = false
 
-  constructor(container: HTMLElement, state: ProjectState) {
+  constructor(container: HTMLElement, state: ProjectState, options: SceneAppOptions = {}) {
     this.state = state
-    const ionToken = import.meta.env.VITE_CESIUM_ION_TOKEN
+    this.editing = options.editing ?? true
+    this.projectBase = options.projectBase ?? "/project/"
+    const env = (import.meta as { env?: Record<string, string | undefined> }).env
+    const globalScope = typeof window !== "undefined" ? (window as unknown as { CESIUM_ION_TOKEN?: string }) : undefined
+    const ionToken = env?.VITE_CESIUM_ION_TOKEN ?? globalScope?.CESIUM_ION_TOKEN
     if (ionToken) C.Ion.defaultAccessToken = ionToken
     this.viewer = new C.Viewer(container, {
       animation: false,
@@ -48,7 +68,7 @@ export class SceneApp {
     const scene = this.viewer.scene
     scene.globe.baseColor = C.Color.fromCssColorString("#2b3038")
     scene.globe.depthTestAgainstTerrain = true
-    ;(this.viewer.cesiumWidget.creditContainer as HTMLElement).style.display = 'none'
+    ;(this.viewer.cesiumWidget.creditContainer as HTMLElement).style.display = "none"
 
     this.handler = new C.ScreenSpaceEventHandler(scene.canvas)
     this.handler.setInputAction((e: C.ScreenSpaceEventHandler.PositionedEvent) => {
@@ -57,6 +77,7 @@ export class SceneApp {
   }
 
   private handleClick(position: C.Cartesian2): void {
+    if (!this.editing) return
     const picked = this.viewer.scene.pick(position)
     // gizmo 手柄的 GeometryInstance id 带 axis 字段，忽略这类点击
     if (picked && typeof picked.id === "object" && picked.id && "axis" in picked.id) return
@@ -111,6 +132,49 @@ export class SceneApp {
     })
   }
 
+  private async loadPrimitive(node: SceneNode, handle: Handle, sig: string): Promise<void> {
+    const asset = this.state.assets.find((a) => a.id === node.assetId)
+    if (!asset) throw new Error("资源不存在")
+    const url = assetUrl(asset, this.projectBase)
+
+    if (node.type === "model") {
+      const model = await C.Model.fromGltfAsync({
+        url,
+        modelMatrix: nodeWorldMatrix(this.state, node),
+        id: node.id,
+      })
+      if (this.destroyed || this.handles.get(node.id) !== handle || handle.signature !== sig) {
+        this.viewer.scene.primitives.remove(model)
+        return
+      }
+      this.viewer.scene.primitives.add(model)
+      handle.primitive = model
+      model.show = node.visible
+      // fromGltfAsync 完成时模型尚未渲染首帧，boundingSphere 要等 ready 后才可读
+      const ready = await this.waitModelReady(model)
+      if (this.destroyed || this.handles.get(node.id) !== handle || handle.signature !== sig) return
+      if (!ready) throw new Error("模型就绪超时")
+      handle.ready = true
+      this.onNodeReady(node.id)
+      this.requestRender()
+      return
+    }
+
+    const tileset = await C.Cesium3DTileset.fromUrl(url)
+    if (this.destroyed || this.handles.get(node.id) !== handle || handle.signature !== sig) {
+      tileset.destroy()
+      return
+    }
+    this.viewer.scene.primitives.add(tileset)
+    handle.primitive = tileset
+    // 节点变换相对场景锚点；modelMatrix 叠加在 tileset 自身定位之上
+    tileset.modelMatrix = this.tilesetMatrix(node)
+    tileset.show = node.visible
+    handle.ready = true
+    this.onNodeReady(node.id)
+    this.requestRender()
+  }
+
   /** 等待模型完成首帧更新（_ready），requestRenderMode 下主动驱动渲染 */
   private waitModelReady(model: C.Model, timeoutMs = 15000): Promise<boolean> {
     return new Promise((resolve) => {
@@ -136,50 +200,6 @@ export class SceneApp {
       }, 50)
       timeout = setTimeout(() => finish(model.ready), timeoutMs)
     })
-  }
-
-  private async loadPrimitive(node: SceneNode, handle: Handle, sig: string): Promise<void> {
-    const asset = this.state.assets.find((a) => a.id === node.assetId)
-    if (!asset) throw new Error("资源不存在")
-    const url = await resolveAssetUrl(asset)
-    if (this.destroyed || handle.abort.signal.aborted || this.handles.get(node.id) !== handle) return
-
-    if (node.type === "model") {
-      const model = await C.Model.fromGltfAsync({
-        url,
-        modelMatrix: nodeWorldMatrix(this.state, node),
-        id: node.id,
-      })
-      if (this.destroyed || this.handles.get(node.id) !== handle || handle.signature !== sig) {
-        this.viewer.scene.primitives.remove(model)
-        return
-      }
-      this.viewer.scene.primitives.add(model)
-      handle.primitive = model
-      model.show = node.visible
-      // fromGltfAsync 完成时模型尚未渲染首帧，boundingSphere 要等 ready 后才可读
-      const ready = await this.waitModelReady(model)
-      if (this.destroyed || this.handles.get(node.id) !== handle || handle.signature !== sig) return
-      if (!ready) throw new Error('模型就绪超时')
-      handle.ready = true
-      this.onNodeReady(node.id)
-      this.requestRender()
-      return
-    }
-
-    const tileset = await C.Cesium3DTileset.fromUrl(url)
-    if (this.destroyed || this.handles.get(node.id) !== handle || handle.signature !== sig) {
-      tileset.destroy()
-      return
-    }
-    this.viewer.scene.primitives.add(tileset)
-    handle.primitive = tileset
-    // 节点变换相对场景锚点；modelMatrix 叠加在 tileset 自身定位之上
-    tileset.modelMatrix = this.tilesetMatrix(node)
-    tileset.show = node.visible
-    handle.ready = true
-    this.onNodeReady(node.id)
-    this.requestRender()
   }
 
   /** 文档值 → 运行时（签名未变化时被 sync 调用） */
@@ -247,7 +267,8 @@ export class SceneApp {
     if (!node) return
     let sphere: C.BoundingSphere | undefined
     try {
-      if ((handle?.primitive as C.Model | undefined)?.ready !== false) sphere = handle?.primitive?.boundingSphere
+      if ((handle?.primitive as C.Model | undefined)?.ready !== false)
+        sphere = handle?.primitive?.boundingSphere
     } catch {
       sphere = undefined // 模型尚未就绪时 boundingSphere 会抛错，退回矩阵中心
     }
