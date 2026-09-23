@@ -1,7 +1,20 @@
 <script setup lang="ts">
-import { computed, ref } from 'vue'
-import { Box, Folder, FolderAdd, CopyDocument, Delete, MagicStick, View, Hide } from '@element-plus/icons-vue'
-import { nodeDescendants, orderedNodes, type ProjectState, type SceneNode } from '@scene/schema'
+import { computed, reactive, ref } from 'vue'
+import {
+  Box,
+  Close,
+  Folder,
+  FolderAdd,
+  CopyDocument,
+  Delete,
+  MagicStick,
+  MapLocation,
+  Picture,
+  Plus,
+  View,
+  Hide,
+} from '@element-plus/icons-vue'
+import { nodeDescendants, orderedNodes, type ImageryLayerConfig, type ProjectState, type SceneNode } from '@scene/schema'
 
 export interface HierarchyMove {
   id: string
@@ -14,6 +27,8 @@ type DropZone = 'before' | 'after' | 'inside'
 const props = defineProps<{
   state: ProjectState
   selectedId: string
+  imageryLayers: ImageryLayerConfig[]
+  baseMapShow: boolean
 }>()
 
 const emit = defineEmits<{
@@ -25,11 +40,85 @@ const emit = defineEmits<{
   remove: []
   prefab: []
   move: [payload: HierarchyMove]
+  mapAdd: [payload: { name: string; url: string; subdomains?: string; maximumLevel?: number; credit?: string }]
+  mapToggle: [payload: { id: string; show: boolean }]
+  mapRemove: [id: string]
+  mapBaseToggle: [show: boolean]
 }>()
 
 const rows = computed(() => orderedNodes(props.state))
 
 const typeIcon = (node: SceneNode) => (node.type === 'group' ? Folder : Box)
+
+// ---------- 地图图层 ----------
+
+/** 内置图层模板 */
+const BUILTIN_LAYERS = [
+  {
+    name: 'OpenStreetMap 标准图',
+    url: 'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
+    maximumLevel: 19,
+    credit: '© OpenStreetMap contributors',
+  },
+  {
+    name: 'ArcGIS 卫星影像',
+    url: 'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
+    maximumLevel: 19,
+    credit: 'Esri, Maxar, Earthstar Geographics',
+  },
+  {
+    name: '高德矢量地图',
+    url: 'https://webrd0{s}.is.autonavi.com/appmaptile?x={x}&y={y}&z={z}&lang=zh_cn&size=1&scale=1&style=8',
+    subdomains: '1234',
+    maximumLevel: 18,
+  },
+  {
+    name: '高德卫星影像',
+    url: 'https://webst0{s}.is.autonavi.com/appmaptile?x={x}&y={y}&z={z}&style=6',
+    subdomains: '1234',
+    maximumLevel: 18,
+  },
+  {
+    name: 'CartoDB 暗色',
+    url: 'https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}.png',
+    subdomains: 'abcd',
+    maximumLevel: 20,
+    credit: '© CARTO © OpenStreetMap contributors',
+  },
+]
+
+const mapDialogVisible = ref(false)
+const customForm = reactive({ name: '', url: '', subdomains: '' })
+
+function openMapDialog() {
+  customForm.name = ''
+  customForm.url = ''
+  customForm.subdomains = ''
+  mapDialogVisible.value = true
+}
+
+function addBuiltin(layer: (typeof BUILTIN_LAYERS)[number]) {
+  emit('mapAdd', { ...layer })
+  mapDialogVisible.value = false
+}
+
+function addCustom() {
+  const url = customForm.url.trim()
+  if (!customForm.name.trim()) {
+    ElMessage.warning('请输入图层名称')
+    return
+  }
+  if (!/^https?:\/\//i.test(url) || !/\{x\}/.test(url) || !/\{z\}/.test(url)) {
+    ElMessage.warning('地址需为 http(s) URL 模板，且包含 {x} {y} {z} 占位')
+    return
+  }
+  emit('mapAdd', {
+    name: customForm.name.trim(),
+    url,
+    subdomains: customForm.subdomains.trim() || undefined,
+  })
+  mapDialogVisible.value = false
+}
 
 // ---------- 拖拽排序 ----------
 
@@ -112,6 +201,55 @@ function rowClasses(row: { node: SceneNode }): Record<string, boolean> {
 
 <template>
   <aside class="hierarchy">
+    <!-- 固定的地图图层组 -->
+    <div class="map-layers">
+      <div class="map-layer-head">
+        <el-icon size="14" color="var(--accent)"><MapLocation /></el-icon>
+        <span>地图图层</span>
+        <span class="count">{{ imageryLayers.length + 1 }}</span>
+        <span class="spacer"></span>
+        <el-tooltip content="添加图层（内置 / 自定义）" :show-after="400">
+          <el-button :icon="Plus" size="small" text type="primary" @click="openMapDialog" />
+        </el-tooltip>
+      </div>
+      <div class="map-layer-row base">
+        <el-icon size="13" color="var(--fg-dim)"><Picture /></el-icon>
+        <span class="layer-name">Bing 影像（默认）</span>
+        <el-tag size="small" type="info" effect="plain">底图</el-tag>
+        <el-icon
+          size="14"
+          :color="baseMapShow ? 'var(--fg-dim)' : 'var(--accent)'"
+          title="显示 / 隐藏默认底图"
+          @click="emit('mapBaseToggle', !baseMapShow)"
+        >
+          <View v-if="baseMapShow" />
+          <Hide v-else />
+        </el-icon>
+      </div>
+      <div v-for="layer in imageryLayers" :key="layer.id" class="map-layer-row" :class="{ off: !layer.show }">
+        <el-icon size="13" color="var(--fg-dim)"><Picture /></el-icon>
+        <span class="layer-name" :title="layer.url">{{ layer.name }}</span>
+        <el-icon
+          size="14"
+          class="action"
+          :color="layer.show ? 'var(--fg-dim)' : 'var(--accent)'"
+          @click="emit('mapToggle', { id: layer.id, show: !layer.show })"
+        >
+          <View v-if="layer.show" />
+          <Hide v-else />
+        </el-icon>
+        <el-icon
+          size="14"
+          class="action"
+          color="var(--fg-dim)"
+          title="移除图层"
+          @click.stop="emit('mapRemove', layer.id)"
+        >
+          <Close />
+        </el-icon>
+      </div>
+    </div>
+
     <div class="panel-head">
       <span>场景对象</span>
       <span class="count">{{ rows.length }}</span>
@@ -120,6 +258,7 @@ function rowClasses(row: { node: SceneNode }): Record<string, boolean> {
         <el-button :icon="FolderAdd" size="small" text type="primary" @click="emit('addGroup')" />
       </el-tooltip>
     </div>
+
     <div
       class="node-list"
       :class="{ 'root-drop': rootDrop }"
@@ -178,5 +317,37 @@ function rowClasses(row: { node: SceneNode }): Record<string, boolean> {
         </el-button>
       </el-tooltip>
     </div>
+
+    <!-- 添加地图图层 -->
+    <el-dialog v-model="mapDialogVisible" title="添加地图图层" width="520px" append-to-body>
+      <div class="section-title" style="margin: 0 0 8px">内置图层</div>
+      <div class="builtin-layers">
+        <el-button
+          v-for="layer in BUILTIN_LAYERS"
+          :key="layer.name"
+          size="small"
+          plain
+          @click="addBuiltin(layer)"
+        >
+          {{ layer.name }}
+        </el-button>
+      </div>
+      <div class="section-title" style="margin: 16px 0 8px">自定义图层</div>
+      <el-form label-position="top" size="small" @submit.prevent="addCustom">
+        <el-form-item label="名称">
+          <el-input v-model="customForm.name" placeholder="如：内网瓦片服务" />
+        </el-form-item>
+        <el-form-item label="URL 模板（支持 {x} {y} {z} {s} 占位）">
+          <el-input v-model="customForm.url" placeholder="https://example.com/{z}/{x}/{y}.png" />
+        </el-form-item>
+        <el-form-item label="{s} 子域（可选，如 abc 或 1234）">
+          <el-input v-model="customForm.subdomains" placeholder="abc" style="max-width: 160px" />
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="mapDialogVisible = false">取消</el-button>
+        <el-button type="primary" @click="addCustom">添加自定义</el-button>
+      </template>
+    </el-dialog>
   </aside>
 </template>

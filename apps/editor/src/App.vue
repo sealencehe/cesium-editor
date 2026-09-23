@@ -231,6 +231,43 @@ function addGroup() {
   choose(node.id)
 }
 
+// ---------- 地图图层 ----------
+
+function addMapLayer(payload: { name: string; url: string; subdomains?: string; maximumLevel?: number; credit?: string }) {
+  edit('添加图层', (s) => {
+    ;(s.scene.imageryLayers ??= []).push({
+      id: uid('map-'),
+      name: payload.name,
+      url: payload.url,
+      show: true,
+      subdomains: payload.subdomains,
+      maximumLevel: payload.maximumLevel,
+      credit: payload.credit,
+    })
+  })
+  status(`已添加图层 ${payload.name}`)
+}
+
+function onMapLayerToggle(payload: { id: string; show: boolean }) {
+  edit('修改图层', (s) => {
+    const layer = (s.scene.imageryLayers ?? []).find((l) => l.id === payload.id)
+    if (layer) layer.show = payload.show
+  })
+}
+
+function removeMapLayer(id: string) {
+  edit('移除图层', (s) => {
+    s.scene.imageryLayers = (s.scene.imageryLayers ?? []).filter((l) => l.id !== id)
+  })
+}
+
+function toggleBaseMap(show: boolean) {
+  app?.setBaseMapShow(show)
+  edit('修改图层', (s) => {
+    s.scene.baseMapShow = show
+  })
+}
+
 /** 场景树拖拽：子树整体移动；换父级时保持世界变换不变 */
 function onHierarchyMove(p: HierarchyMove) {
   if (!history || !app) return
@@ -1050,6 +1087,8 @@ onBeforeUnmount(() => {
       v-if="state"
       :state="state"
       :selected-id="selectedId"
+      :imagery-layers="state.scene.imageryLayers ?? []"
+      :base-map-show="state.scene.baseMapShow ?? true"
       @select="choose"
       @focus="focusNode"
       @toggle="toggleVisible"
@@ -1058,6 +1097,10 @@ onBeforeUnmount(() => {
       @remove="removeNode"
       @prefab="savePrefab"
       @move="onHierarchyMove"
+      @map-add="addMapLayer"
+      @map-toggle="onMapLayerToggle"
+      @map-remove="removeMapLayer"
+      @map-base-toggle="toggleBaseMap"
     />
 
     <main

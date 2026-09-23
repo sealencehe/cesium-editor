@@ -475,3 +475,59 @@ body {
   color: var(--accent);
   font-size: 12px;
 }
+
+/* 地图图层固定组 */
+.map-layers {
+  border-bottom: 1px solid var(--line);
+  max-height: 220px;
+  overflow-y: auto;
+}
+
+.map-layer-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 10px;
+  color: var(--fg-dim);
+  position: sticky;
+  top: 0;
+  background: var(--panel);
+  border-bottom: 1px solid var(--line);
+}
+
+.map-layer-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  white-space: nowrap;
+}
+
+.map-layer-row:hover {
+  background: rgba(64, 158, 255, 0.08);
+}
+
+.map-layer-row .layer-name {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-size: 12px;
+}
+
+.map-layer-row.off .layer-name {
+  color: var(--fg-dim);
+}
+
+.map-layer-row .action {
+  cursor: pointer;
+}
+
+.map-layer-row .action:hover {
+  color: var(--accent);
+}
+
+.builtin-layers {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}

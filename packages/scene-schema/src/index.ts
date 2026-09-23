@@ -57,6 +57,24 @@ export interface SceneDocument {
   anchor: Vec3
   nodes: SceneNode[]
   camera: SceneCamera
+  /** 自定义地图图层（叠加在默认底图之上，数组顺序即图层顺序） */
+  imageryLayers?: ImageryLayerConfig[]
+  /** 默认底图（Bing 影像）是否可见，缺省为 true */
+  baseMapShow?: boolean
+}
+
+export interface ImageryLayerConfig {
+  id: string
+  name: string
+  /** URL 模板，支持 {x} {y} {z} {s} 占位 */
+  url: string
+  show: boolean
+  /** {s} 子域字符集，如 "abc" / "1234" */
+  subdomains?: string
+  /** 最大缩放级别 */
+  maximumLevel?: number
+  /** 版权说明 */
+  credit?: string
 }
 
 export interface ProjectState {
@@ -162,6 +180,15 @@ export function validateProject(state: ProjectState): string | null {
   }
   if (!validTransform({ position: state.scene.anchor, rotation: [0, 0, 0], scale: [1, 1, 1] }))
     return "场景锚点数值无效"
+  const layerIds = new Set<string>()
+  for (const layer of state.scene.imageryLayers ?? []) {
+    if (!layer.id || layerIds.has(layer.id)) return `地图图层 id 重复或为空`
+    layerIds.add(layer.id)
+    if (!layer.name || !layer.url) return `地图图层 ${layer.name || "(未命名)"} 缺少名称或地址`
+    if (layer.url.includes("..")) return `地图图层 ${layer.name} 的地址不允许包含 ..`
+  }
+  if (state.scene.baseMapShow !== undefined && typeof state.scene.baseMapShow !== "boolean")
+    return "默认底图可见性取值无效"
   return null
 }
 

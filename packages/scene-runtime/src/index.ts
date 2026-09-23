@@ -2,10 +2,16 @@
 // 职责：模型 / 3D Tiles 加载、文档 diff 同步、拾取、相机、矩阵换算。
 
 import * as C from "cesium"
-import type { Asset, ProjectState, SceneNode, Transform, Vec3 } from "@scene/schema"
+import type { Asset, ImageryLayerConfig, ProjectState, SceneNode, Transform, Vec3 } from "@scene/schema"
 import { localFromWorld, nodeWorldMatrix, parentWorldMatrix, sceneFrame, transformsEqual } from "./matrix"
 
 export { transformsEqual }
+
+interface ManagedImagery {
+  id: string
+  name: string
+  layer: C.ImageryLayer
+}
 
 interface Handle {
   ready: boolean
@@ -114,6 +120,74 @@ export class SceneApp {
     for (const id of [...this.handles.keys()]) {
       if (!seen.has(id)) this.destroyHandle(id)
     }
+    this.syncImagery(state.scene.imageryLayers ?? [], state.scene.baseMapShow ?? true)
+    this.requestRender()
+  }
+
+  // ---------- 地图图层 ----------
+
+  private mapLayers: ManagedImagery[] = []
+  private imagerySignature = ""
+
+  private createImageryLayer(cfg: ImageryLayerConfig): ManagedImagery | null {
+    try {
+      const provider = new C.UrlTemplateImageryProvider({
+        url: cfg.url,
+        subdomains: cfg.subdomains || "abc",
+        maximumLevel: cfg.maximumLevel,
+        credit: cfg.credit,
+      })
+      const layer = this.viewer.imageryLayers.addImageryProvider(provider)
+      layer.show = cfg.show
+      return { id: cfg.id, name: cfg.name, layer }
+    } catch (err) {
+      this.onError(`地图图层 ${cfg.name} 添加失败：${err instanceof Error ? err.message : String(err)}`)
+      return null
+    }
+  }
+
+  /** 文档图层配置 → 运行时：按 id 增量同步，避免显隐切换时重建闪烁 */
+  private syncImagery(configs: ImageryLayerConfig[], baseShow: boolean): void {
+    const base = this.viewer.imageryLayers.get(0)
+    if (base) base.show = baseShow
+
+    const signature = JSON.stringify([configs, baseShow])
+    if (signature === this.imagerySignature) return
+    this.imagerySignature = signature
+
+    const existing = new Map(this.mapLayers.map((m) => [m.id, m]))
+    const next: ManagedImagery[] = []
+    for (const cfg of configs) {
+      const kept = existing.get(cfg.id)
+      if (kept) {
+        kept.name = cfg.name
+        kept.layer.show = cfg.show
+        existing.delete(cfg.id)
+        next.push(kept)
+      } else {
+        const created = this.createImageryLayer(cfg)
+        if (created) next.push(created)
+      }
+    }
+    for (const [, m] of existing) this.viewer.imageryLayers.remove(m.layer, true)
+
+    // 图层顺序与配置一致（底图保持在最底层，索引 0）
+    const collection = this.viewer.imageryLayers
+    for (let i = next.length - 1; i >= 0; i--) {
+      let idx = collection.indexOf(next[i]!.layer)
+      for (let guard = 0; idx > i + 1 && guard < 64; guard++) {
+        collection.lower(next[i]!.layer)
+        idx = collection.indexOf(next[i]!.layer)
+      }
+    }
+    this.mapLayers = next
+    this.requestRender()
+  }
+
+  /** 默认底图（Bing 影像）显隐 */
+  setBaseMapShow(show: boolean): void {
+    const base = this.viewer.imageryLayers.get(0)
+    if (base) base.show = show
     this.requestRender()
   }
 
