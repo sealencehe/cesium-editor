@@ -224,8 +224,6 @@ export function startServer(store: ProjectStore): http.Server {
     fs.createReadStream(file).pipe(res)
   }
 
-  server.listen(PORT, "127.0.0.1", () => {
-    process.stdout.write(`[project-tools] 工程服务已启动 http://127.0.0.1:${PORT}\n`)
-  })
+  server.listen(PORT, "127.0.0.1")
   return server
 }

@@ -43,6 +43,7 @@ const state = shallowRef<ProjectState | null>(null)
 const selectedId = ref('')
 const mode = ref<GizmoMode>('translate')
 const booting = ref(true)
+const bootError = ref('')
 const importing = ref(false)
 const message = ref('')
 const saveState = ref<'saved' | 'dirty' | 'saving'>('saved')
@@ -878,25 +879,39 @@ onMounted(async () => {
 
   dirInputRef.value?.setAttribute('webkitdirectory', '')
 
-  const data = await fetchState()
-  revision = data.revision
-  projectName.value = data.projectName
-  history = new EditorHistory(data.state)
-  history.onChange = refresh
-  state.value = data.state
-  app.sync(data.state)
-  app.restoreCamera()
-  refresh()
-
-  window.addEventListener('keydown', keydown)
-  window.addEventListener('beforeunload', beforeUnload)
-  revisionTimer = setInterval(() => void pollRevision(), 3000)
-  Object.assign(window, {
-    __cesiumEditor: { app, history, gizmo },
-  })
-  booting.value = false
-  bootstrapped = true
+  void bootstrap()
 })
+
+async function bootstrap() {
+  bootError.value = ''
+  booting.value = true
+  try {
+    const data = await fetchState()
+    revision = data.revision
+    projectName.value = data.projectName
+    history = new EditorHistory(data.state)
+    history.onChange = refresh
+    state.value = data.state
+    app!.sync(data.state)
+    app!.restoreCamera()
+    refresh()
+    if (!bootstrapped) {
+      window.addEventListener('keydown', keydown)
+      window.addEventListener('beforeunload', beforeUnload)
+      revisionTimer = setInterval(() => void pollRevision(), 3000)
+      Object.assign(window, {
+        __cesiumEditor: { app, history, gizmo },
+      })
+      bootstrapped = true
+    }
+  } catch (err) {
+    bootError.value =
+      `工程服务连接失败：${err instanceof Error ? err.message : String(err)}。` +
+      '请确认用 bun run dev 启动，且端口 5200 / 5201 未被残留进程占用（taskkill /F /IM bun.exe 清理后重试）。'
+  } finally {
+    booting.value = false
+  }
+}
 
 onBeforeUnmount(() => {
   if (!bootstrapped) return
@@ -1003,6 +1018,12 @@ onBeforeUnmount(() => {
       <div v-if="booting || importing" class="loading-mask">
         <el-icon class="is-loading" :size="22"><Loading /></el-icon>
         {{ importing ? '正在导入资源…' : '正在初始化…' }}
+      </div>
+      <div v-if="bootError" class="loading-mask boot-error">
+        <div style="max-width: 480px; text-align: center">
+          <p style="margin-bottom: 14px; white-space: pre-wrap; line-height: 1.6">{{ bootError }}</p>
+          <el-button type="primary" @click="bootstrap">重试</el-button>
+        </div>
       </div>
       <div class="viewport-strip">
         <el-button size="small" :icon="Camera" @click="saveDefaultView">设为默认视角</el-button>
