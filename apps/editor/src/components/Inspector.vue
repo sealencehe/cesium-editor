@@ -1,5 +1,6 @@
 <script setup lang="ts">
-import { watch, reactive } from 'vue'
+import { watch, reactive, ref } from 'vue'
+import { Lock, Unlock } from '@element-plus/icons-vue'
 import type { SceneNode, Transform } from '@scene/schema'
 import { clone } from '@scene/schema'
 
@@ -16,6 +17,9 @@ const emit = defineEmits<{
 }>()
 
 const form = reactive<SceneNode>(clone(props.node ?? makeEmpty()))
+
+/** 缩放比例锁：锁定时改任一轴，三轴同步（分组节点始终等比） */
+const scaleLocked = ref(true)
 
 function makeEmpty(): SceneNode {
   return {
@@ -52,7 +56,7 @@ function setRot(i: number, v: number | null | undefined) {
 
 function setScale(i: number, v: number | null | undefined) {
   if (v === null || v === undefined || dragging() || !(v > 0)) return
-  if (form.type === 'group') {
+  if (form.type === 'group' || scaleLocked.value) {
     form.transform.scale = [v, v, v]
   } else {
     form.transform.scale[i] = v
@@ -205,6 +209,22 @@ const typeLabel = (node: SceneNode) =>
           controls-position="right"
           @change="(v: number | undefined) => setScale(2, v)"
         />
+      </div>
+      <div v-if="node.type !== 'group'" style="display: flex; justify-content: flex-end; margin-top: 6px">
+        <el-tooltip
+          :content="scaleLocked ? '等比缩放已锁定：修改任一轴三轴同步，点击解锁' : '三轴独立缩放：点击锁定为等比'"
+          :show-after="300"
+        >
+          <el-button
+            size="small"
+            :type="scaleLocked ? 'primary' : 'default'"
+            plain
+            :icon="scaleLocked ? Lock : Unlock"
+            @click="scaleLocked = !scaleLocked"
+          >
+            {{ scaleLocked ? '等比' : '独立' }}
+          </el-button>
+        </el-tooltip>
       </div>
 
       <div class="section-title">操作</div>
