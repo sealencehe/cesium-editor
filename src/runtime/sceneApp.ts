@@ -28,6 +28,8 @@ export class SceneApp {
 
   constructor(container: HTMLElement, state: ProjectState) {
     this.state = state
+    const ionToken = import.meta.env.VITE_CESIUM_ION_TOKEN
+    if (ionToken) C.Ion.defaultAccessToken = ionToken
     this.viewer = new C.Viewer(container, {
       animation: false,
       timeline: false,
@@ -39,9 +41,6 @@ export class SceneApp {
       fullscreenButton: false,
       infoBox: false,
       selectionIndicator: false,
-      baseLayer: new C.ImageryLayer(
-        new C.OpenStreetMapImageryProvider({ url: 'https://tile.openstreetmap.org/' }),
-      ),
       terrainProvider: new C.EllipsoidTerrainProvider(),
       scene3DOnly: true,
       requestRenderMode: true,
@@ -112,6 +111,33 @@ export class SceneApp {
     })
   }
 
+  /** 等待模型完成首帧更新（_ready），requestRenderMode 下主动驱动渲染 */
+  private waitModelReady(model: C.Model, timeoutMs = 15000): Promise<boolean> {
+    return new Promise((resolve) => {
+      if (model.ready) {
+        resolve(true)
+        return
+      }
+      let done = false
+      let poll: ReturnType<typeof setInterval> | undefined
+      let timeout: ReturnType<typeof setTimeout> | undefined
+      const finish = (ok: boolean) => {
+        if (done) return
+        done = true
+        if (poll) clearInterval(poll)
+        if (timeout) clearTimeout(timeout)
+        removeReadyListener()
+        resolve(ok)
+      }
+      const removeReadyListener = model.readyEvent.addEventListener(() => finish(true))
+      poll = setInterval(() => {
+        if (model.ready) finish(true)
+        else this.requestRender()
+      }, 50)
+      timeout = setTimeout(() => finish(model.ready), timeoutMs)
+    })
+  }
+
   private async loadPrimitive(node: SceneNode, handle: Handle, sig: string): Promise<void> {
     const asset = this.state.assets.find((a) => a.id === node.assetId)
     if (!asset) throw new Error("资源不存在")
@@ -131,6 +157,10 @@ export class SceneApp {
       this.viewer.scene.primitives.add(model)
       handle.primitive = model
       model.show = node.visible
+      // fromGltfAsync 完成时模型尚未渲染首帧，boundingSphere 要等 ready 后才可读
+      const ready = await this.waitModelReady(model)
+      if (this.destroyed || this.handles.get(node.id) !== handle || handle.signature !== sig) return
+      if (!ready) throw new Error('模型就绪超时')
       handle.ready = true
       this.onNodeReady(node.id)
       this.requestRender()
@@ -215,7 +245,12 @@ export class SceneApp {
     const handle = this.handles.get(id)
     const node = this.state.scene.nodes.find((n) => n.id === id)
     if (!node) return
-    let sphere: C.BoundingSphere | undefined = handle?.primitive?.boundingSphere
+    let sphere: C.BoundingSphere | undefined
+    try {
+      if ((handle?.primitive as C.Model | undefined)?.ready !== false) sphere = handle?.primitive?.boundingSphere
+    } catch {
+      sphere = undefined // 模型尚未就绪时 boundingSphere 会抛错，退回矩阵中心
+    }
     if (!sphere) {
       sphere = new C.BoundingSphere(
         C.Matrix4.getTranslation(nodeWorldMatrix(this.state, node), new C.Cartesian3()),
