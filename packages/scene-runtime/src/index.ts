@@ -54,13 +54,16 @@ export class SceneApp {
   private handler: C.ScreenSpaceEventHandler
   private destroyed = false
 
-  // 地图图层 / 地形状态
+  // 地图图层 / 地形状态（期望状态 + 完成后对账，异步加载期间配置变化不会丢更新）
   private mapLayers: ManagedImagery[] = []
-  private imagerySignature = ""
-  private terrainSignature = ""
+  private loadingLayers = new Set<string>()
+  private terrainWantedSig = ""
+  private terrainAppliedSig = ""
   private terrainPending = false
+  private desiredBaseToken = ""
   private appliedBaseToken = ""
   private baseSwapping = false
+  private renderBurstTimer: ReturnType<typeof setTimeout> | undefined
 
   constructor(container: HTMLElement, state: ProjectState, options: SceneAppOptions = {}) {
     this.state = state
@@ -308,50 +311,60 @@ export class SceneApp {
     }
   }
 
-  /** 文档图层配置 → 运行时：按 id + 加载签名增量同步，显隐切换不重建 */
+  /** 文档图层配置 → 运行时：按 id + 加载签名增量 diff（幂等，可随时重跑） */
   private syncImagery(configs: ImageryLayerConfig[]): void {
-    const signature = JSON.stringify(configs)
-    if (signature !== this.imagerySignature) {
-      this.imagerySignature = signature
-      const existing = new Map(this.mapLayers.map((m) => [m.id, m]))
-      const next: ManagedImagery[] = []
-      for (const cfg of configs) {
-        const loadSig = SceneApp.loadSignature(cfg)
-        const kept = existing.get(cfg.id)
-        if (kept && kept.signature === loadSig) {
-          kept.name = cfg.name
-          if (kept.layer) kept.layer.show = cfg.show
-          existing.delete(cfg.id)
-          next.push(kept)
-          continue
-        }
-        if (kept?.layer) this.viewer.imageryLayers.remove(kept.layer, true)
+    const existing = new Map(this.mapLayers.map((m) => [m.id, m]))
+    const next: ManagedImagery[] = []
+    for (const cfg of configs) {
+      const loadSig = SceneApp.loadSignature(cfg)
+      const kept = existing.get(cfg.id)
+      if (kept && kept.signature === loadSig) {
+        kept.name = cfg.name
+        if (kept.layer) kept.layer.show = cfg.show
+        else if (!this.loadingLayers.has(cfg.id)) this.queueImageryLoad(cfg, loadSig)
         existing.delete(cfg.id)
-        const managed: ManagedImagery = { id: cfg.id, name: cfg.name, signature: loadSig }
-        next.push(managed)
-        void this.createImageryLayer(cfg).then((layer) => {
-          if (this.destroyed) {
-            if (layer) this.viewer.imageryLayers.remove(layer, true)
-            return
-          }
-          const current = (this.state.scene.imageryLayers ?? []).find((c) => c.id === cfg.id)
-          if (!current || SceneApp.loadSignature(current) !== loadSig) {
-            if (layer) this.viewer.imageryLayers.remove(layer, true)
-            return
-          }
-          managed.layer = layer ?? undefined
-          if (managed.layer) managed.layer.show = current.show
-          this.reorderImagery()
-          this.requestRender()
-        })
+        next.push(kept)
+        continue
       }
-      for (const [, m] of existing) {
-        if (m.layer) this.viewer.imageryLayers.remove(m.layer, true)
-      }
-      this.mapLayers = next
+      if (kept?.layer) this.viewer.imageryLayers.remove(kept.layer, true)
+      existing.delete(cfg.id)
+      const managed: ManagedImagery = { id: cfg.id, name: cfg.name, signature: loadSig }
+      next.push(managed)
+      if (!this.loadingLayers.has(cfg.id)) this.queueImageryLoad(cfg, loadSig)
     }
+    for (const [, m] of existing) {
+      if (m.layer) this.viewer.imageryLayers.remove(m.layer, true)
+    }
+    this.mapLayers = next
     this.reorderImagery()
     this.requestRender()
+  }
+
+  /** 异步加载一个图层；完成后与最新配置对账，期间配置变过则重新 diff */
+  private queueImageryLoad(cfg: ImageryLayerConfig, loadSig: string): void {
+    this.loadingLayers.add(cfg.id)
+    void this.createImageryLayer(cfg).then((layer) => {
+      this.loadingLayers.delete(cfg.id)
+      if (this.destroyed) {
+        if (layer) this.viewer.imageryLayers.remove(layer, true)
+        return
+      }
+      const current = (this.state.scene.imageryLayers ?? []).find((c) => c.id === cfg.id)
+      const currentSig = current ? SceneApp.loadSignature(current) : null
+      const live = this.mapLayers.find((m) => m.id === cfg.id)
+      if (!current || !live || currentSig !== loadSig) {
+        if (layer) this.viewer.imageryLayers.remove(layer, true)
+      } else {
+        live.layer = layer ?? undefined
+        if (live.layer) live.layer.show = current.show
+      }
+      this.reorderImagery()
+      this.keepRendering()
+      if (currentSig !== null && currentSig !== loadSig) {
+        // 加载期间配置已变化：补一次 diff
+        this.syncImagery(this.state.scene.imageryLayers ?? [])
+      }
+    })
   }
 
   /** 图层顺序与配置一致（底图保持在最底层，索引 0） */
@@ -375,55 +388,91 @@ export class SceneApp {
     this.requestRender()
   }
 
-  /** 替换默认底图的 ion 令牌（不填恢复 Cesium 默认令牌） */
+  /** 替换默认底图的 ion 令牌（不填恢复 Cesium 默认令牌）；加载期间变化会自动重试 */
   swapBaseMapToken(token: string | undefined): void {
     const desired = token ?? ""
-    if (desired === this.appliedBaseToken || this.baseSwapping) return
+    this.desiredBaseToken = desired
+    if (!this.baseSwapping && desired !== this.appliedBaseToken) void this.applyBaseToken(desired)
+  }
+
+  private async applyBaseToken(desired: string): Promise<void> {
     this.baseSwapping = true
-    void (async () => {
-      try {
-        const provider = await C.IonImageryProvider.fromAssetId(2, desired ? { accessToken: desired } : {})
-        if (this.destroyed) return
-        const layers = this.viewer.imageryLayers
-        const old = layers.get(0)
-        const added = layers.addImageryProvider(provider, 0)
-        added.show = old ? old.show : true
-        if (old) layers.remove(old, true)
-        this.appliedBaseToken = desired
-        this.requestRender()
-      } catch (err) {
+    try {
+      const provider = await C.IonImageryProvider.fromAssetId(2, desired ? { accessToken: desired } : {})
+      if (this.destroyed || desired !== this.desiredBaseToken) return
+      const layers = this.viewer.imageryLayers
+      const old = layers.get(0)
+      const added = layers.addImageryProvider(provider, 0)
+      added.show = old ? old.show : true
+      if (old) layers.remove(old, true)
+      this.appliedBaseToken = desired
+      this.keepRendering()
+    } catch (err) {
+      if (desired === this.desiredBaseToken) {
         this.onError(`底图加载失败：${err instanceof Error ? err.message : String(err)}（检查 ion 令牌）`)
-      } finally {
-        this.baseSwapping = false
+        this.appliedBaseToken = desired // 失败不重试；用户改令牌后会再次触发
       }
-    })()
+    } finally {
+      this.baseSwapping = false
+      if (!this.destroyed && this.desiredBaseToken !== this.appliedBaseToken) {
+        void this.applyBaseToken(this.desiredBaseToken)
+      }
+    }
   }
 
   private syncTerrain(cfg: TerrainConfig | undefined): void {
-    const signature = JSON.stringify(cfg ?? { kind: "ellipsoid" })
-    if (signature === this.terrainSignature) return
-    this.terrainSignature = signature
-    if (!cfg || cfg.kind === "ellipsoid" || !cfg.ionToken) {
-      this.viewer.terrainProvider = new C.EllipsoidTerrainProvider()
-      this.requestRender()
-      return
-    }
-    if (this.terrainPending) return
+    const sig = JSON.stringify(cfg ?? { kind: "ellipsoid" })
+    this.terrainWantedSig = sig
+    if (!this.terrainPending && sig !== this.terrainAppliedSig) void this.loadTerrain(sig)
+  }
+
+  private async loadTerrain(sig: string): Promise<void> {
     this.terrainPending = true
-    const wanted = signature
-    void (async () => {
-      try {
-        const resource = await C.IonResource.fromAssetId(cfg.ionAssetId ?? 1, { accessToken: cfg.ionToken })
-        const provider = await C.CesiumTerrainProvider.fromUrl(resource)
-        if (this.destroyed || wanted !== this.terrainSignature) return
-        this.viewer.terrainProvider = provider
+    try {
+      if (sig !== this.terrainWantedSig) return
+      const parsed = JSON.parse(sig) as TerrainConfig
+      if (parsed.kind !== "ion" || !parsed.ionToken) {
+        if (sig !== this.terrainWantedSig) return
+        this.viewer.terrainProvider = new C.EllipsoidTerrainProvider()
+        this.terrainAppliedSig = sig
         this.requestRender()
-      } catch (err) {
-        this.onError(`ion 地形加载失败：${err instanceof Error ? err.message : String(err)}（检查令牌与资产 id）`)
-      } finally {
-        this.terrainPending = false
+        return
       }
-    })()
+      const resource = await C.IonResource.fromAssetId(parsed.ionAssetId ?? 1, {
+        accessToken: parsed.ionToken,
+      })
+      const provider = await C.CesiumTerrainProvider.fromUrl(resource)
+      if (this.destroyed || sig !== this.terrainWantedSig) return
+      this.viewer.terrainProvider = provider
+      this.terrainAppliedSig = sig
+      this.keepRendering(6000)
+    } catch (err) {
+      if (sig === this.terrainWantedSig) {
+        this.onError(`ion 地形加载失败：${err instanceof Error ? err.message : String(err)}（检查令牌与资产 id）`)
+        this.terrainAppliedSig = sig // 失败不自动重试；用户修改配置后会再次触发
+      }
+    } finally {
+      this.terrainPending = false
+      if (!this.destroyed && this.terrainWantedSig !== this.terrainAppliedSig) {
+        void this.loadTerrain(this.terrainWantedSig)
+      }
+    }
+  }
+
+  /** requestRenderMode 下短时间持续请求渲染，驱动瓦片流式加载的界面更新 */
+  private keepRendering(ms = 4000): void {
+    this.requestRender()
+    if (this.renderBurstTimer) return
+    const until = performance.now() + ms
+    const tick = () => {
+      if (this.destroyed || performance.now() > until) {
+        this.renderBurstTimer = undefined
+        return
+      }
+      this.requestRender()
+      this.renderBurstTimer = setTimeout(tick, 200)
+    }
+    this.renderBurstTimer = setTimeout(tick, 200)
   }
 
   // ---------- 变换读取（供 gizmo 提交用） ----------
