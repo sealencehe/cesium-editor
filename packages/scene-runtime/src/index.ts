@@ -27,6 +27,9 @@ export function assetUrl(asset: Asset, projectBase: string): string {
   return projectBase.replace(/\/$/, "") + "/" + asset.uri.replace(/^\//, "")
 }
 
+const SELECT_COLOR = C.Color.fromCssColorString("#ffd04b")
+const SELECT_SILHOUETTE_SIZE = 3
+
 export class SceneApp {
   viewer: C.Viewer
   state: ProjectState
@@ -230,6 +233,18 @@ export class SceneApp {
 
   requestRender(): void {
     if (!this.destroyed) this.viewer.scene.requestRender()
+  }
+
+  /** 选中高亮：模型用 Cesium 原生模板描边（只描外轮廓，不含内部结构） */
+  setSelected(id: string | null): void {
+    for (const [hid, h] of this.handles) {
+      const model = h.primitive
+      if (model instanceof C.Model) {
+        model.silhouetteColor = SELECT_COLOR
+        model.silhouetteSize = hid === id ? SELECT_SILHOUETTE_SIZE : 0
+      }
+    }
+    this.requestRender()
   }
 
   // ---------- 变换读取（供 gizmo 提交用） ----------

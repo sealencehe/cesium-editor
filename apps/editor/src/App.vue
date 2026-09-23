@@ -123,6 +123,7 @@ function refresh() {
   } else {
     gizmo?.bind(sel)
   }
+  app?.setSelected(selectedId.value || null)
   scheduleAutosave()
 }
 
@@ -130,6 +131,7 @@ function choose(id: string) {
   selectedId.value = id
   const node = id && history ? history.state.scene.nodes.find((n) => n.id === id) : undefined
   gizmo?.bind(node ?? null)
+  app?.setSelected(id || null)
 }
 
 // ---------- 命令 ----------
@@ -860,6 +862,7 @@ onMounted(async () => {
     choose(id ?? '')
   }
   app.onNodeReady = (id) => {
+    app?.setSelected(selectedId.value)
     if (id === selectedId.value) {
       const node = history?.state.scene.nodes.find((n) => n.id === id)
       gizmo?.bind(node ?? null)

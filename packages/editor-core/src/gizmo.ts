@@ -45,6 +45,23 @@ export class EditorGizmo {
     })
     window.addEventListener("pointerup", () => this.handleUp())
     window.addEventListener("blur", () => this.cancel())
+    this.disableImageOutline()
+  }
+
+  /**
+   * 禁用 gizmo 自带的图像边缘检测描边（会把模型内部结构也描出来），
+   * 选中高亮改由 SceneApp.setSelected 用 Cesium 原生模板描边实现。
+   */
+  private disableImageOutline(): void {
+    const internals = this.gizmo as unknown as {
+      _outlineStage?: { enabled: boolean }
+      _edgeDetectionStage?: { enabled: boolean; selected: unknown[] }
+    }
+    if (internals._outlineStage) internals._outlineStage.enabled = false
+    if (internals._edgeDetectionStage) {
+      internals._edgeDetectionStage.enabled = false
+      internals._edgeDetectionStage.selected = []
+    }
   }
 
   get busy(): boolean {
