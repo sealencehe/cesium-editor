@@ -446,3 +446,32 @@ body {
   font-size: 13px;
   box-shadow: 0 4px 14px rgba(0, 0, 0, 0.4);
 }
+
+/* 场景树拖拽排序指示 */
+.node-row.dragging {
+  opacity: 0.45;
+}
+
+.node-row.drop-before {
+  box-shadow: inset 0 2px 0 0 var(--accent);
+}
+
+.node-row.drop-after {
+  box-shadow: inset 0 -2px 0 0 var(--accent);
+}
+
+.node-row.drop-inside {
+  background: rgba(64, 158, 255, 0.22);
+  outline: 1px dashed var(--accent);
+  outline-offset: -1px;
+}
+
+.node-list.root-drop {
+  box-shadow: inset 0 2px 0 0 var(--accent);
+}
+
+.root-drop-hint {
+  padding: 6px 10px;
+  color: var(--accent);
+  font-size: 12px;
+}

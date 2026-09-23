@@ -17,7 +17,7 @@ import {
   VideoPlay,
 } from '@element-plus/icons-vue'
 import AssetBrowser from './components/AssetBrowser.vue'
-import HierarchyPanel from './components/HierarchyPanel.vue'
+import HierarchyPanel, { type HierarchyMove } from './components/HierarchyPanel.vue'
 import Inspector from './components/Inspector.vue'
 import { api, ConflictError, fetchState, type StateResponse } from './api'
 import { usePanels } from './usePanels'
@@ -229,6 +229,57 @@ function addGroup() {
     s.scene.nodes.push(node)
   })
   choose(node.id)
+}
+
+/** 场景树拖拽：子树整体移动；换父级时保持世界变换不变 */
+function onHierarchyMove(p: HierarchyMove) {
+  if (!history || !app) return
+  const sceneApp = app
+  const node = history.state.scene.nodes.find((n) => n.id === p.id)
+  if (!node) return
+  if (p.type !== 'root-end' && p.nodeId === p.id) return
+  const world = sceneApp.worldMatrixOf(node)
+  edit('拖动排序', (s) => {
+    const moving = s.scene.nodes.find((n) => n.id === p.id)
+    if (!moving) return
+    const ids = new Set([p.id, ...nodeDescendants(s, p.id)])
+    const block = s.scene.nodes.filter((n) => ids.has(n.id))
+    s.scene.nodes = s.scene.nodes.filter((n) => !ids.has(n.id))
+
+    let parentId: string | null
+    let index: number
+    if (p.type === 'root-end') {
+      parentId = null
+      index = s.scene.nodes.length
+    } else {
+      const ref = s.scene.nodes.find((n) => n.id === p.nodeId)
+      if (!ref) return
+      if (p.type === 'inside') {
+        if (ref.type !== 'group') return
+        parentId = ref.id
+        let last = s.scene.nodes.findIndex((n) => n.id === ref.id)
+        for (const d of nodeDescendants(s, ref.id)) {
+          const i = s.scene.nodes.findIndex((n) => n.id === d)
+          if (i > last) last = i
+        }
+        index = last + 1
+      } else {
+        parentId = ref.parentId ?? null
+        index = s.scene.nodes.findIndex((n) => n.id === ref.id) + (p.type === 'before' ? 0 : 1)
+      }
+    }
+
+    if (moving.parentId !== parentId) {
+      moving.transform = sceneApp.localFromWorldOf(parentId, world)
+      if (moving.type === 'group') {
+        const [sx, sy, sz] = moving.transform.scale
+        const u = (sx + sy + sz) / 3
+        moving.transform.scale = [u, u, u]
+      }
+      moving.parentId = parentId
+    }
+    s.scene.nodes.splice(index, 0, ...block)
+  })
 }
 
 function toggleVisible(node: SceneNode) {
@@ -1006,6 +1057,7 @@ onBeforeUnmount(() => {
       @copy="copyNode"
       @remove="removeNode"
       @prefab="savePrefab"
+      @move="onHierarchyMove"
     />
 
     <main
