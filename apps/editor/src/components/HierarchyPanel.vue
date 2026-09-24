@@ -91,13 +91,6 @@ const BUILTIN_LAYERS = [
     subdomains: '1234',
     maximumLevel: 18,
   },
-  {
-    name: 'CartoDB 暗色',
-    url: 'https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}.png',
-    subdomains: 'abcd',
-    maximumLevel: 20,
-    credit: '© CARTO © OpenStreetMap contributors',
-  },
 ]
 
 const mapDialogVisible = ref(false)
