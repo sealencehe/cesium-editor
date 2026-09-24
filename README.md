@@ -1,6 +1,7 @@
 # Cesium 场景编辑器
 
-功能与架构（apps/packages 分层 + 本地工程服务）实现。
+基于原生 Cesium 与 Element Plus 的本地三维场景编辑器
+（apps/packages 分层 + 本地工程服务）。
 
 ## 启动
 
@@ -16,6 +17,7 @@ bun run dev
 - Vite dev server（5200，编辑器 + /player.html 预览页）
 - 本地工程服务（5201，`/api/*` 与 `/project/*` 静态资源）
 
+端口为 5200/5201，如与其他本地服务冲突可在 cli.ts / vite.config.ts 中调整。
 如需 Cesium ion 影像，在 `.env.local` 里配置 `VITE_CESIUM_ION_TOKEN=自己的Token`。
 
 ## 编辑
@@ -51,3 +53,4 @@ projects/       工程数据目录（gitignore）
 .exports/       导出产物目录（gitignore）
 ```
 
+节点变换约定：场景锚点 ENU 坐标系，节点局部 TRS（位置米 / HPR 度 / 缩放）。
